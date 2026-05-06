@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Python Workflow for Polarization and Strain Mapping"
+abstract: >
+  A reproducible Python workflow for automated extraction of polarization
+  vector maps from relative sublattice displacements and directional,
+  atom-resolved lattice strain maps derived from local interplanar spacings,
+  applied to atomic-resolution STEM images of functional oxides.
+authors:
+  - family-names: Istrate
+    given-names: M. C.
+    affiliation: "National Institute of Materials Physics, 105 bis Atomistilor, 077125 Magurele, Romania"
+    email: cosmin.istrate@infim.ro
+  - family-names: Negrea
+    given-names: R. F.
+    affiliation: "National Institute of Materials Physics, 105 bis Atomistilor, 077125 Magurele, Romania"
+repository-code: "https://github.com/cosmin7225/python-workflow-for-polarization-and-strain-mapping"
+license: MIT
+keywords:
+  - STEM
+  - atomic resolution
+  - polarization mapping
+  - strain mapping
+  - ferroelectrics
+  - HyperSpy
+  - Atomap
+  - Python
+preferred-citation:
+  type: article
+  title: >
+    Automated polarization vector and strain mapping from atomic-resolution
+    STEM images using a reproducible Python workflow
+  authors:
+    - family-names: Istrate
+      given-names: M. C.
+    - family-names: Negrea
+      given-names: R. F.
+  journal: "Ultramicroscopy"
+  status: under-review
+  year: 2025
