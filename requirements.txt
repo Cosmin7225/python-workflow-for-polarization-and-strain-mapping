@@ -1,0 +1,21 @@
+# Core scientific stack used by both notebooks
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+pandas>=2.0
+
+# STEM image loading and calibrated data handling
+hyperspy>=2.0
+
+# Notebook environment
+jupyterlab>=4.0
+
+# Atomic-column detection used by the strain routine
+atomap>=0.4
+
+# Plotting helpers used by the strain routine
+seaborn>=0.12
+
+# Optional: cyclic colormaps for orientation maps
+# (Matplotlib's cyclic colormap is used as a fallback if this is absent)
+colorcet>=3.0
