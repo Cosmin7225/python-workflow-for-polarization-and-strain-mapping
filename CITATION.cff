@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use polarmap, please cite it as below."
+title: "polarmap: atomic-column displacement and strain mapping from atomic-resolution STEM images"
+type: software
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping"
+url: "https://cosmin7225.github.io/python-workflow-for-polarization-and-strain-mapping/"
+authors:
+  - family-names: Istrate
+    given-names: Marian Cosmin
+    email: cosmin.istrate@infim.ro
+    affiliation: "National Institute of Materials Physics, Magurele, Romania"
+  - family-names: Negrea
+    given-names: Raluca Florentina
+    affiliation: "National Institute of Materials Physics, Magurele, Romania; Brunel Centre for Advanced Solidification Technology (BCAST), Brunel University London, UK"
+keywords:
+  - STEM
+  - HAADF
+  - ferroelectric
+  - perovskite
+  - polarization
+  - strain mapping
+  - electron microscopy
