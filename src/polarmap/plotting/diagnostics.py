@@ -28,23 +28,83 @@ def _image_limits(ax, image):
     ax.set_aspect("equal")
 
 
-def plot_columns(image, positions, *, ax=None, color="r", s=10, marker="o",
-                 title=None, label=None):
-    """Overlay detected or refined column positions on the image.
+def plot_columns(image, positions, *, ax=None, color="lime", s=12,
+                 marker="o", title=None, label=None,
+                 crop_size=256, zoom_s=70):
+    """Display column positions on the full image and a central detail.
 
-    Check that every intended column carries exactly one marker and that the
-    other sublattice is not picked up.
+    Coordinates must be supplied as (x, y), in pixels.
+    This function only displays results; it does not modify them.
     """
-    fig, ax = get_axes(ax)
-    show_image(ax, image)
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    image = np.asarray(image)
     pos = np.asarray(positions, dtype=float).reshape(-1, 2)
-    ax.scatter(pos[:, 0], pos[:, 1], s=s, facecolors="none", edgecolors=color,
-               marker=marker, linewidths=0.8, label=label)
+
+    # Without an existing axis, create two panels.
+    if ax is None:
+        fig, (ax, ax_zoom) = plt.subplots(
+            1, 2, figsize=(14, 7), dpi=120,
+            constrained_layout=True
+        )
+    else:
+        fig = ax.figure
+        ax_zoom = ax.inset_axes([0.62, 0.03, 0.35, 0.35])
+
+    # Central region, expressed in the original image coordinates.
+    h, w = image.shape
+    size = max(1, int(crop_size))
+    ch, cw = min(size, h), min(size, w)
+    y0, x0 = (h - ch) // 2, (w - cw) // 2
+    y1, x1 = y0 + ch, x0 + cw
+
+    # Full image: resampling for display only.
+    show_image(ax, image, interpolation="hanning")
+    ax.scatter(
+        pos[:, 0], pos[:, 1],
+        s=s, facecolors="none", edgecolors=color,
+        marker=marker, linewidths=0.8, label=label
+    )
+
+    ax.add_patch(Rectangle(
+        (x0 - 0.5, y0 - 0.5), cw, ch,
+        fill=False, edgecolor="cyan", linewidth=1.2
+    ))
+
     _image_limits(ax, image)
     ax.axis("off")
     ax.set_title(title or f"{len(pos)} columns")
+
     if label:
         ax.legend(loc="upper right", fontsize=8)
+
+    # Select positions located inside the central region.
+    inside = (
+        (pos[:, 0] >= x0 - 0.5) &
+        (pos[:, 0] < x1 - 0.5) &
+        (pos[:, 1] >= y0 - 0.5) &
+        (pos[:, 1] < y1 - 0.5)
+    )
+    selected = pos[inside]
+
+    # Display the same image and contrast, zoomed into the central region.
+    show_image(ax_zoom, image, interpolation="nearest")
+    ax_zoom.scatter(
+        selected[:, 0], selected[:, 1],
+        s=zoom_s, facecolors="none", edgecolors=color,
+        marker=marker, linewidths=1.0
+    )
+
+    ax_zoom.set_xlim(x0 - 0.5, x1 - 0.5)
+    ax_zoom.set_ylim(y1 - 0.5, y0 - 0.5)
+    ax_zoom.set_title(
+        f"Central detail — {cw} × {ch} px\n"
+        f"{len(selected)} columns"
+    )
+    ax_zoom.set_xticks([])
+    ax_zoom.set_yticks([])
+
     return fig, ax
 
 
