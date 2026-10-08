@@ -17,8 +17,9 @@ htmlcov/
 docs/_build/
 docs/examples/
 
-# Environments
+# Environments (VS Code "Python: Create Environment" makes .venv or .conda)
 .venv/
+.conda/
 venv/
 env/
 
