@@ -1,0 +1,4 @@
+# Extra files in the source distribution (the wheel contains only the package).
+include CHANGELOG.md CITATION.cff LICENSE README.md
+graft tests
+global-exclude __pycache__ *.py[cod]

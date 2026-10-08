@@ -1,0 +1,32 @@
+# Byte-compiled / build artefacts
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Documentation build (docs/examples holds copies made by docs/conf.py)
+docs/_build/
+docs/examples/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Editors and notebooks
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.DS_Store
+
+# Figures and tables written by the examples
+examples/output/

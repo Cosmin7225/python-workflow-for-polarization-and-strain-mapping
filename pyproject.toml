@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polarmap"
+dynamic = ["version"]
+description = "Atomic-column displacement and real-space strain mapping from atomic-resolution STEM images of ferroelectric perovskites"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Marian Cosmin Istrate", email = "cosmin.istrate@infim.ro" },
+    { name = "Raluca Florentina Negrea" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.23",
+    "scipy>=1.9",
+    "matplotlib>=3.6",
+]
+keywords = [
+    "STEM", "HAADF", "electron microscopy", "ferroelectric", "perovskite",
+    "polarization", "displacement", "strain", "atomic resolution",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+[project.optional-dependencies]
+# Reading proprietary microscopy formats (dm3/dm4/emd/...) via HyperSpy.
+io = ["hyperspy>=1.7"]
+# Perceptually uniform cyclic colour map for orientation maps.
+colors = ["colorcet>=3.0"]
+# Everything a typical microscopist needs.
+all = ["polarmap[io,colors]", "jupyterlab>=4"]
+test = ["pytest>=7", "pytest-cov"]
+docs = [
+    "sphinx>=7",
+    "furo",
+    "myst-nb>=1",
+    "sphinxcontrib-mermaid",
+    "sphinx-copybutton",
+]
+dev = ["polarmap[test,docs]", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping"
+Documentation = "https://cosmin7225.github.io/python-workflow-for-polarization-and-strain-mapping/"
+Source = "https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping"
+Issues = "https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "polarmap._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+polarmap = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "slow: long-running end-to-end tests",
+    "hyperspy: needs HyperSpy and the example data files",
+]
+filterwarnings = [
+    "error::DeprecationWarning:polarmap",
+    "error::FutureWarning:polarmap",
+]
+
+[tool.coverage.run]
+source = ["polarmap"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "NPY", "UP"]
+ignore = ["E741"]
