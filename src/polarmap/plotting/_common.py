@@ -47,35 +47,38 @@ def get_axes(ax=None, figsize=(7, 7)):
 
 
 def show_image(ax, image, *, dim=False, keep_contrast=0.55, wash=0.35,
-               cmap="gray", percentiles=(1.0, 99.0), extent=None):
-    """Display a grey-scale image with robust contrast limits.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-    image : array_like
-    dim : bool, default False
-        Reduce the contrast and wash the image towards white so that overlaid
-        arrows or colour maps remain visible over both bright and dark columns.
-    keep_contrast, wash : float
-        Strength of the dimming (only with ``dim=True``).
-    cmap : str, default "gray"
-    percentiles : (float, float), default (1, 99)
-        Intensity percentiles mapped to black and white.
-    extent : sequence, optional
-        Passed to ``imshow`` (default: pixel coordinates).
-    """
+               cmap="gray", percentiles=(1.0, 99.0), extent=None,
+               interpolation="hanning"):
+    """Display the image without modifying the analysis data."""
     image = np.asarray(image, dtype=float)
+
     lo, hi = np.nanpercentile(image, percentiles)
+
     if dim:
         mid = 0.5 * (lo + hi)
         half = 0.5 * (hi - lo) / max(keep_contrast, 1e-3)
         lo, hi = mid - half, mid + half
-    im = ax.imshow(image, cmap=cmap, vmin=lo, vmax=hi, extent=extent,
-                   interpolation="nearest")
+
+    im = ax.imshow(
+        image,
+        cmap=cmap,
+        vmin=lo,
+        vmax=hi,
+        extent=extent,
+        interpolation=interpolation,
+    )
+
     if dim and wash > 0:
-        ax.imshow(np.ones_like(image), cmap="gray", vmin=0, vmax=1, alpha=wash,
-                  extent=extent)
+        ax.imshow(
+            np.ones_like(image),
+            cmap="gray",
+            vmin=0,
+            vmax=1,
+            alpha=wash,
+            extent=extent,
+            interpolation=interpolation,
+        )
+
     return im
 
 
