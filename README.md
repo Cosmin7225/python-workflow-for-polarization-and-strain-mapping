@@ -1,132 +1,151 @@
-# Atomic-column displacement and real-space strain mapping from atomic-resolution STEM images
+# polarmap
 
-This repository contains my transparent Python workflow for extracting **projected atomic-column displacements** and real-space strain from atomic-resolution STEM images (HAADF/ABF).
+**Atomic-column displacement and real-space strain mapping from atomic-resolution
+STEM images of ferroelectric perovskites.**
 
-The quantity I measure directly is an image-derived displacement in pixels, nanometres, or picometres. It is **not an absolute polarization** unless the displacements of all relevant sublattices, their Born effective-charge tensors, and the unit-cell volume are supplied.
+[![tests](https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping/actions/workflows/tests.yml/badge.svg)](https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping/actions/workflows/tests.yml)
+[![docs](https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping/actions/workflows/docs.yml/badge.svg)](https://cosmin7225.github.io/python-workflow-for-polarization-and-strain-mapping/)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)
 
-## Scope
+`polarmap` is an installable, tested Python package that turns a calibrated
+atomic-resolution image (HAADF, ADF, iDPC or ABF) into
 
-The workflow provides:
+- **displacement maps** of polar columns relative to their centrosymmetric
+  reference, built from the *measured* neighbouring columns: complete
+  four-corner cages (perovskite [100]), complete two-column pairs (perovskite
+  [110]), or a fixed basis offset (dumbbell / wurtzite-type projections);
+- **strain maps**: along one lattice direction against an external bulk spacing
+  (Method 1), or the full in-plane strain and rigid-rotation tensor against a
+  reference region of the same image (Method 2), both from a lattice graph whose
+  bonds are validated by a loop-closure test;
+- **statistics and publication figures**: circular orientation statistics,
+  arrow maps and colour maps with scale bars, layer profiles, diagnostics.
 
-- calibrated loading of DM3/DM4, EMD, HDF5 and other formats supported by HyperSpy;
-- independent local-maximum detection and bounded two-dimensional Gaussian refinement;
-- complete four-corner cage references for perovskite-like projections such as [100];
-- complete pair references for projections such as perovskite [110];
-- a fractional pair reference that can be adapted to a side-view wurtzite geometry;
-- displacement-vector, magnitude and orientation maps;
-- circular statistics for vector orientations;
-- directional strain relative to an external reference spacing;
-- full in-plane strain and rigid-body rotation from a validated local lattice graph;
-- diagnostic plots, outlier reporting and portable figure export.
+> **Displacement is not polarization.** The measured quantity is an
+> image-derived, projected displacement (pixels or pm). An absolute polarization
+> would need the displacements of all sublattices, their Born effective-charge
+> tensors and the unit-cell volume; `displacement_to_polarization` gives a
+> clearly labelled single-sublattice estimate.
 
-The implementation uses NumPy, SciPy, Matplotlib, pandas and HyperSpy, with Atomap used for atomic-column detection in the strain routine. Trusted coordinates refined by another program can also be supplied directly to the reference and strain routines.
-
-## Repository structure
-
-```text
-notebooks/
-    Displacement_workflow_complete.ipynb   # atomic-column displacement mapping
-    Strain_map_python_routine.ipynb        # real-space strain and rotation mapping
-
-example images/
-    ImgOrigin.dm4                          # raw acquired image
-    PZO11040nmHAADF.dm4                     # PbZrO3-type HAADF example
-    PTO10040nmHAADF.dm4                     # PbTiO3-type HAADF example
-
-README.md
-requirements.txt
-```
-
-- **`Displacement_workflow_complete.ipynb`** detects atomic columns, builds the reference sublattice, and computes the per-column displacement vectors, magnitude and orientation maps.
-- **`Strain_map_python_routine.ipynb`** takes the same calibrated images and reconstructs the in-plane strain tensor and rigid-body rotation from a validated local lattice graph.
-
-The files in **`example images/`** are the calibrated DM4 datasets I use to run the notebooks end to end.
-
-## Crystallographic reference models
-
-### Complete four-corner cage
-
-For a perovskite-like [100] projection, the ideal target position is the centroid of the four **measured** reference columns forming a complete projected cell. I reject a target site if any corner is missing or outside the geometric tolerance.
-
-### Complete pair
-
-For a perovskite [110] projection, the ideal target position is the midpoint between two measured, crystallographically equivalent reference columns:
-
-```text
-r_ideal = 0.5 r_0 + 0.5 r_1
-```
-
-For a side-view wurtzite projection, the same pair implementation can be used with the ideal fractional coordinate `u_ref = 3/8` along a complete local cation-to-cation repeat:
-
-```text
-r_N,ideal = (1 - u_ref) r_C,k + u_ref r_C,k+1
-```
-
-This wurtzite adaptation requires structure- and imaging-specific validation. In particular, light-column positions may be affected by mistilt, residual aberrations, thickness-dependent channeling and overlap with neighbouring heavy columns.
-
-## Coordinate convention
-
-Image coordinates use `+x` to the right and `+y` downward. The stored displacement is
-
-```text
-(u, v) = measured_target - local_reference
-```
-
-For Cartesian orientation statistics and colour coding, I use
-
-```text
-theta = atan2(-v, u)
-```
-
-so that `0°` points rightward, `+90°` points upward and positive angles increase counter-clockwise.
+📖 **Documentation:** <https://cosmin7225.github.io/python-workflow-for-polarization-and-strain-mapping/>
 
 ## Installation
 
-I recommend creating a clean environment and installing the pinned dependencies:
+Python 3.10 or newer. The core needs only NumPy, SciPy and Matplotlib; the
+`all` extra adds HyperSpy (for DM3/DM4/EMD files), colorcet and JupyterLab.
 
 ```bash
-conda create -n stem-displacement python=3.10
-conda activate stem-displacement
-pip install -r requirements.txt
+pip install "polarmap[all] @ git+https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping.git"
 ```
 
-`colorcet` is optional; Matplotlib's cyclic colormap is used as a fallback.
-
-## Running the notebooks
-
-Launch Jupyter and open the notebooks in the **`notebooks/`** folder:
+or, with conda, from a clone of this repository:
 
 ```bash
-jupyter lab
+conda env create -f environment.yml
+conda activate polarmap
 ```
 
-For experimental data, set the image path to the original calibrated DM3/DM4, EMD or HDF5 file whenever possible. The datasets in **`example images/`** can be used directly to reproduce the workflow. Display-oriented PNG/JPEG/TIFF files should be used only as a fallback and require an explicitly verified pixel calibration.
+For development: `pip install -e ".[all,test]"` in a clone. See the
+[installation guide](https://cosmin7225.github.io/python-workflow-for-polarization-and-strain-mapping/installation.html)
+for all options.
 
-Run each notebook from top to bottom. Before interpreting a map, inspect the diagnostic overlays and confirm that:
+## Quick example
 
-1. reference-column seeds identify only the intended sublattice;
-2. every cage reference has four measured corners;
-3. every pair reference has both measured endpoints;
-4. target fits remain within the local search window;
-5. vector sign and angle conventions match the manuscript;
-6. edge and outlier exclusions are reported.
+```python
+import polarmap as pm
+from polarmap import plotting
 
-## Validation
+image, sampling = pm.load_image("examples/data/PTO10040nmHAADF.dm4")   # nm/px from the file
 
-The associated manuscript validates the displacement results against Vec-map for perovskite [100] and [110] projections and compares the strain maps with geometric phase analysis using the same calibrated image, reference region and matched effective spatial resolution. Numerical comparison tables and processing-sensitivity tests are provided in the Supplementary Information.
+seeds = pm.detect_peaks(image, min_distance=30, threshold_rel=0.2, exclude_border=5)
+A = pm.refine_gaussian(image, seeds, box=10)          # sub-pixel Pb columns
+v1, v2 = pm.estimate_lattice_vectors(A)
+field = pm.measure_cage_displacement(image, A, v1, v2)  # Ti shift in each complete cage
 
-## Reproducibility
+print(pm.format_descriptors(pm.describe_displacements(field, sampling)))
+# Displacement descriptors (n = 64, 0 excluded as outliers)
+#   magnitude |d| (pm): mean 20.5  median 20.5 ...
+plotting.plot_displacement_vectors(field, image, sampling=sampling, scalebar_nm="auto")
+```
 
-All analysis steps are implemented directly in the notebooks and are intended to be reproducible. Key processing parameters are explicitly defined in the workflow. A tagged release and an archived DOI are recommended for the manuscript version.
+Strain (Methods 1 and 2) follows the same pattern:
+
+```python
+graph = pm.build_lattice_graph(positions, v1, v2)                       # validated bonds
+m1 = pm.projection_strain(graph, v2, d0_px=0.3905 / sampling)           # vs bulk d0
+reference = pm.fit_reference_lattice(graph, pm.in_rectangle(positions, (100, 1000), (450, 650)))
+tensor = pm.tensor_strain(graph, reference)                             # exx, eyy, exy, omega
+plotting.plot_strain_tensor(tensor, sampling=sampling)
+```
+
+## Examples
+
+The notebooks in [`examples/`](examples) run the complete workflows on the data
+in [`examples/data/`](examples/data) (rendered with outputs in the
+documentation):
+
+| Notebook | Content |
+|---|---|
+| [01_quickstart_synthetic](examples/01_quickstart_synthetic.ipynb) | recover a known displacement from a synthetic image (no files needed) |
+| [02_displacement_perovskite_100](examples/02_displacement_perovskite_100.ipynb) | PbTiO₃ [100]: complete cages, statistics, arrow and colour maps |
+| [03_displacement_perovskite_110](examples/03_displacement_perovskite_110.ipynb) | PbZrO₃ [110]: intensity split, complete pairs, antipolar pattern |
+| [04_strain_superlattice](examples/04_strain_superlattice.ipynb) | experimental superlattice: lattice graph, Methods 1 and 2, interfaces |
+
+## How it works
+
+| Step | Module | Key idea |
+|---|---|---|
+| Load | `polarmap.io` | calibrated DM3/DM4/EMD (HyperSpy), MRC (built in), TIFF/PNG/NPY with explicit pixel size |
+| Columns | `polarmap.columns` | local maxima + bounded 2-D Gaussian fit; Gaussian vs centre-of-mass precision proxy |
+| Lattice | `polarmap.lattice` | lattice vectors from the columns; neighbours by minimum perpendicular offset; loop-closure validation; BFS indexing |
+| Displacement | `polarmap.displacement` | reference = centroid of the measured complete cage, or interpolation along a measured complete pair |
+| Strain | `polarmap.strain` | Method 1: $(d - d_0)/d_0$; Method 2: per-column deformation gradient $F$, $\varepsilon = \mathrm{sym}(F) - I$, $\omega = \mathrm{asym}(F)$ |
+| Figures | `polarmap.plotting` | arrows or colour maps, colour wheels in the data's angle convention, scale bars, compact colour bars |
+
+The [algorithm page](https://cosmin7225.github.io/python-workflow-for-polarization-and-strain-mapping/algorithm.html)
+shows both workflows as flowcharts, and the
+[limitations page](https://cosmin7225.github.io/python-workflow-for-polarization-and-strain-mapping/limitations.html)
+discusses imaging artefacts, reference choices and interfaces.
+
+### Coordinate conventions
+
+Positions are `(x, y)` pixels with `+y` **down**. Displacements are
+`(u, v) = measured target − reference`. Orientations use the Cartesian convention
+`θ = atan2(−v, u)` (0° right, +90° up) for statistics *and* colour coding;
+`convention="image"` switches to `atan2(v, u)`.
+
+## Testing
+
+```bash
+pip install -e ".[test,io]"
+pytest
+```
+
+The suite compares against exact ground truth from synthetic images and
+lattices (`polarmap.synthetic`) and pins the results on the example data (for
+instance 64 complete cages and a median Ti displacement of 20.545 pm for the
+simulated PbTiO₃ image). Continuous integration runs it on Linux, macOS and
+Windows for Python 3.10–3.14, with the oldest and newest supported NumPy, SciPy
+and Matplotlib, and weekly against new releases.
+
+## Repository layout
+
+```text
+src/polarmap/     the package
+tests/            test suite
+examples/         example notebooks and data
+docs/             documentation (Sphinx, published to GitHub Pages)
+legacy/           the original notebooks of the first manuscript version
+```
 
 ## Citation
 
-Citation information will be added after publication (manuscript in preparation).
+If you use `polarmap`, please cite it (see [`CITATION.cff`](CITATION.cff)); the
+reference to the accompanying article will be added after publication.
 
-## License
+## License and contact
 
-MIT License.
-
-## Contact
-
-For questions or collaboration requests, please open a GitHub issue or contact me by e-mail (cosmin.istrate@infim.ro).
+MIT License (see [`LICENSE`](LICENSE)). Questions and bug reports:
+[GitHub issues](https://github.com/Cosmin7225/python-workflow-for-polarization-and-strain-mapping/issues)
+or cosmin.istrate@infim.ro.
