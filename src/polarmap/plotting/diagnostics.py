@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import matplotlib.patches as mpatches
 from scipy.spatial import KDTree
+import matplotlib.pyplot as plt
 
 from ..lattice import DIRECTION_NAMES
 from ._common import get_axes, show_image
@@ -237,42 +238,93 @@ def plot_neighbor_diagnostic(graph, index, *, image=None, ax=None, zoom=None,
     return fig, ax
 
 
-def plot_reference_region(image, graph, reference, *, x_range=None, y_range=None,
+def plot_reference_region(image, graph, reference, *,
+                          x_range=None, y_range=None,
                           ax=None, margin=None, title=None):
-    """Show the reference region and which reference columns entered the fit.
+    """Show the full image and a separate reference-region detail."""
+    from matplotlib.patches import Rectangle
 
-    Parameters
-    ----------
-    image : array_like
-    graph : LatticeGraph
-    reference : polarmap.strain.ReferenceLattice
-    x_range, y_range : (float, float), optional
-        The reference rectangle (px) to outline.
-    ax : matplotlib.axes.Axes, optional
-    margin : float, optional
-        Zoom to the reference region with this margin (px); default whole image.
-    """
-    fig, ax = get_axes(ax)
-    show_image(ax, image)
-    pos = graph.positions
-    used = reference.used_mask
-    rejected = reference.reference_mask & ~used
-    ax.scatter(*pos[used].T, s=14, c="lime", label=f"used ({used.sum()})")
-    ax.scatter(*pos[rejected].T, s=24, c="red", marker="x",
-               label=f"rejected ({rejected.sum()})")
-    ax.scatter(*pos[reference.anchor], s=90, c="yellow", marker="*",
-               label="BFS anchor (0, 0)")
-    if x_range is not None and y_range is not None:
-        ax.add_patch(mpatches.Rectangle((min(x_range), min(y_range)),
-                                        abs(x_range[1] - x_range[0]),
-                                        abs(y_range[1] - y_range[0]),
-                                        fill=False, ec="lime", lw=2))
+    image = np.asarray(image)
+    pos = np.asarray(graph.positions)
+    used = np.asarray(reference.used_mask, dtype=bool)
+    ref_mask = np.asarray(reference.reference_mask, dtype=bool)
+    rejected = ref_mask & ~used
+
+    # Determine the reference-region bounds.
+    ref_pos = pos[ref_mask]
+    if len(ref_pos) == 0:
+        raise ValueError("The reference region contains no columns.")
+
+    xmin, xmax = (
+        sorted(x_range) if x_range is not None
+        else (ref_pos[:, 0].min(), ref_pos[:, 0].max())
+    )
+    ymin, ymax = (
+        sorted(y_range) if y_range is not None
+        else (ref_pos[:, 1].min(), ref_pos[:, 1].max())
+    )
+
+    pad = 20.0 if margin is None else float(margin)
+    if pad < 0:
+        raise ValueError("margin must be non-negative.")
+
+    # Respect an existing axis; otherwise create two panels.
+    if ax is None:
+        fig, (ax, ax_ref) = plt.subplots(
+            1, 2, figsize=(14, 7), dpi=120,
+            constrained_layout=True
+        )
+    else:
+        fig = ax.figure
+        detail_fig, ax_ref = plt.subplots(
+            figsize=(7, 7), dpi=120,
+            constrained_layout=True
+        )
+
+    # Full image with the reference rectangle.
+    show_image(ax, image, interpolation="hanning")
+    ax.add_patch(Rectangle(
+        (xmin, ymin), xmax - xmin, ymax - ymin,
+        fill=False, edgecolor="lime", linewidth=1.5
+    ))
     _image_limits(ax, image)
-    if margin is not None and x_range is not None and y_range is not None:
-        ax.set_xlim(min(x_range) - margin, max(x_range) + margin)
-        ax.set_ylim(max(y_range) + margin, min(y_range) - margin)
-    ax.legend(loc="upper right", fontsize=8)
-    ax.set_title(title or "Reference lattice fit: columns used / rejected")
+    ax.set_title("Full image — reference region")
+    ax.axis("off")
+
+    # Same image and contrast, zoomed into the reference region.
+    show_image(ax_ref, image, interpolation="nearest")
+
+    ax_ref.scatter(
+        *pos[used].T,
+        s=35, facecolors="none", edgecolors="lime",
+        linewidths=1.0, label=f"used ({used.sum()})"
+    )
+    ax_ref.scatter(
+        *pos[rejected].T,
+        s=40, c="red", marker="x",
+        linewidths=1.2, label=f"rejected ({rejected.sum()})"
+    )
+    ax_ref.scatter(
+        *pos[reference.anchor],
+        s=110, c="yellow", marker="*",
+        edgecolors="black", linewidths=0.6,
+        label="BFS anchor (0, 0)"
+    )
+
+    h, w = image.shape
+    ax_ref.set_xlim(
+        max(-0.5, xmin - pad),
+        min(w - 0.5, xmax + pad)
+    )
+    ax_ref.set_ylim(
+        min(h - 0.5, ymax + pad),
+        max(-0.5, ymin - pad)
+    )
+
+    ax_ref.legend(loc="upper right", fontsize=8)
+    ax_ref.set_title(title or "Reference region — used / rejected")
+    ax_ref.axis("off")
+
     return fig, ax
 
 
