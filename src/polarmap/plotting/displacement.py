@@ -7,6 +7,8 @@ import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
 from scipy.interpolate import griddata
+from matplotlib.axes import Axes
+from matplotlib.text import Text
 
 from ..lattice import estimate_lattice_vectors
 from ..statistics import describe_displacements
@@ -49,6 +51,15 @@ def _finish_axes(ax, image, title, sampling, scalebar_nm):
                      color="black" if image is None else "white")
 
 
+def _reserve_colorbar_space(ax, location="right"):
+    """Reserve the same space as a colour bar without displaying one."""
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    divider = make_axes_locatable(ax)
+    empty_ax = divider.append_axes(location, size="4%", pad=0.08)
+    empty_ax.set_axis_off()
+
+
 def plot_displacement_vectors(field, image=None, *, color_by="angle",
                               sampling=None, unit="pm", ax=None, scale=10.0,
                               uniform_length=False, cmap=None, color="k",
@@ -58,91 +69,153 @@ def plot_displacement_vectors(field, image=None, *, color_by="angle",
                               clim=None):
     """Draw displacement vectors as arrows over the image.
 
-    Parameters
-    ----------
-    field : DisplacementField
-    image : array_like, optional
-        Background image (shown dimmed by default so the arrows stay visible).
-    color_by : {"angle", "magnitude", None}, default "angle"
-        ``"angle"``: cyclic colour map with a colour-wheel key; ``"magnitude"``:
-        sequential colour map with a colour bar; ``None``: single colour
-        ``color`` with a contrasting ``halo``.
-    sampling : float, optional
-        Pixel size in nm/px; needed for magnitudes in pm/nm and for scale bars.
-    unit : {"pm", "nm"}, default "pm"
-    ax : matplotlib.axes.Axes, optional
-    scale : float, default 10
-        Arrow length magnification (displacements are much smaller than the
-        lattice spacing).
-    uniform_length : bool, default False
-        Draw all arrows with the median length (direction only), which is more
-        readable when magnitudes vary strongly.
-    cmap : str, optional
-        Colour map; default cyclic for angles, ``"plasma"`` for magnitudes.
-    color, halo : str
-        Arrow colour and outline colour for ``color_by=None``.
-    width : float, default 0.004
-        Arrow shaft width (fraction of the axes width).
-    stroke : float, default 1.2
-        Outline width; outlines keep arrows legible over bright and dark
-        columns.
-    convention : {"cartesian", "image"}, default "cartesian"
-        Angle convention for colour coding (see :mod:`polarmap.statistics`).
-    colorbar_location : str, default "right"
-        See :func:`~polarmap.plotting.add_colorbar`.
-    scalebar_nm : float or "auto", optional
-        Add a scale bar of this length.
-    dim_image : bool, default True
-    title : str, optional
-    clim : (float, float), optional
-        Colour limits for magnitudes (default: 0 to the 95th percentile).
+    scale controls visual arrow magnification.
+    uniform_length displays nonzero vectors with the median magnitude.
+    Arrows are clipped at the axes boundary without changing field data.
 
     Returns
     -------
     fig, ax
     """
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("scale must be a positive finite number")
+
     fig, ax = get_axes(ax)
+
     if image is not None:
         show_image(ax, image, dim=dim_image)
+
     u, v = field.u.copy(), field.v.copy()
+
     if uniform_length:
         norm = np.hypot(u, v)
         norm[norm == 0] = 1.0
         length = np.median(np.hypot(field.u, field.v))
         u, v = u / norm * length, v / norm * length
-    kw = dict(angles="xy", scale_units="xy", scale=1.0 / scale, width=width,
-              headwidth=4, headlength=5, headaxislength=4)
+
+    kw = dict(
+        angles="xy",
+        scale_units="xy",
+        scale=1.0 / scale,
+        width=width,
+        headwidth=4,
+        headlength=5,
+        headaxislength=4,
+        clip_on=True
+    )
 
     if color_by == "angle":
         cmap = CYCLIC_CMAP if cmap is None else cmap
-        q = ax.quiver(field.x, field.y, u, v, field.angle(convention), cmap=cmap,
-                      clim=(-180, 180), **kw)
-        q.set_path_effects([pe.withStroke(linewidth=stroke, foreground="k")])
+
+        q = ax.quiver(
+            field.x, field.y, u, v, field.angle(convention),
+            cmap=cmap, clim=(-180, 180), **kw
+        )
+        q.set_path_effects([
+            pe.withStroke(linewidth=stroke, foreground="k")
+        ])
+
         _finish_axes(ax, image, title, sampling, scalebar_nm)
-        add_colorwheel(ax, cmap=cmap, convention=convention,
-                       label=f"direction ({convention})")
+        _reserve_colorbar_space(ax, colorbar_location)
+
+        wheel = add_colorwheel(
+            ax,
+            cmap=cmap,
+            convention=convention,
+            bounds=(0.76, 0.77, 0.19, 0.19),
+            label=""
+        )
+        wheel.tick_params(axis="x", labelsize=16, pad=2)
+
+        for text in wheel.get_xticklabels():
+            text.set_fontweight("bold")
+
     elif color_by == "magnitude":
         cmap = "plasma" if cmap is None else cmap
         mag, label = _magnitude(field, sampling, unit)
+
         if clim is None:
-            clim = (0.0, float(np.nanpercentile(mag, 95)) if mag.size else 1.0)
-        q = ax.quiver(field.x, field.y, u, v, mag, cmap=cmap, clim=clim, **kw)
-        q.set_path_effects([pe.withStroke(linewidth=stroke, foreground="k")])
+            clim = (
+                0.0,
+                float(np.nanpercentile(mag, 95)) if mag.size else 1.0
+            )
+
+        q = ax.quiver(
+            field.x, field.y, u, v, mag,
+            cmap=cmap, clim=clim, **kw
+        )
+        q.set_path_effects([
+            pe.withStroke(linewidth=stroke, foreground="k")
+        ])
+
         _finish_axes(ax, image, title, sampling, scalebar_nm)
-        add_colorbar(q, ax, f"|displacement| ({label})",
-                     location=colorbar_location)
+
+        cbar = add_colorbar(
+            q, ax, f"|displacement| ({label})",
+            location=colorbar_location,
+            size="4%",
+            pad=0.08
+        )
+        cbar.set_label(
+            f"|displacement| ({label})",
+            fontsize=16,
+            fontweight="bold",
+            labelpad=10
+        )
+        cbar.ax.tick_params(axis="both", labelsize=16)
+
+        for text in (
+            cbar.ax.get_xticklabels()
+            + cbar.ax.get_yticklabels()
+        ):
+            text.set_fontweight("bold")
+
+        for axis in (cbar.ax.xaxis, cbar.ax.yaxis):
+            axis.get_offset_text().set_fontsize(16)
+            axis.get_offset_text().set_fontweight("bold")
+
     elif color_by is None:
-        q = ax.quiver(field.x, field.y, u, v, color=color, **kw)
-        q.set_path_effects([pe.withStroke(linewidth=stroke, foreground=halo)])
+        q = ax.quiver(
+            field.x, field.y, u, v,
+            color=color, **kw
+        )
+        q.set_path_effects([
+            pe.withStroke(linewidth=stroke, foreground=halo)
+        ])
+
         _finish_axes(ax, image, title, sampling, scalebar_nm)
+        _reserve_colorbar_space(ax, colorbar_location)
+
     else:
         raise ValueError("color_by must be 'angle', 'magnitude' or None")
+
+    ax.set_title(
+        ax.get_title(),
+        fontsize=16,
+        fontweight="bold",
+        pad=12
+    )
+
+    if image is not None:
+        h, w = np.asarray(image).shape
+        ax.set_xlim(-0.5, w - 0.5)
+        ax.set_ylim(h - 0.5, -0.5)
+
+    ax.set_autoscale_on(False)
+    q.set_clip_on(True)
+    q.set_clip_path(ax.patch)
+    q.set_clip_box(ax.bbox)
+
     return fig, ax
 
 
 def _tile_polygons(xy, v1, v2):
-    corners = np.array([-0.5 * v1 - 0.5 * v2, 0.5 * v1 - 0.5 * v2,
-                        0.5 * v1 + 0.5 * v2, -0.5 * v1 + 0.5 * v2])
+    corners = np.array([
+        -0.5 * v1 - 0.5 * v2,
+         0.5 * v1 - 0.5 * v2,
+         0.5 * v1 + 0.5 * v2,
+        -0.5 * v1 + 0.5 * v2
+    ])
     return xy[:, None, :] + corners[None, :, :]
 
 
@@ -154,180 +227,356 @@ def plot_displacement_map(field, quantity="magnitude", *, image=None,
                           title=None):
     """Colour map of one displacement quantity, without arrows.
 
-    When only the magnitude or only the orientation is of interest, a colour
-    map is easier to read than arrows: each unit cell is filled with a colour
-    encoding the value.
-
-    Parameters
-    ----------
-    field : DisplacementField
-    quantity : {"magnitude", "angle", "u", "v"}, default "magnitude"
-        ``"u"``/``"v"`` are the signed components (``v`` positive **down** in
-        image axes; for ``convention="cartesian"``, ``-v`` is shown so that
-        positive means up).
-    image : array_like, optional
-        Background image (shown underneath; set ``alpha < 1`` to see it).
-    sampling : float, optional
-        nm/px; needed for physical units and scale bars.
-    unit : {"pm", "nm"}, default "pm"
-    kind : {"tiles", "interpolated", "scatter"}, default "tiles"
-        ``"tiles"``: one parallelogram per unit cell (spanned by the lattice
-        vectors, centred on the reference position); ``"interpolated"``:
-        linear interpolation between cells (convex hull only); ``"scatter"``:
-        one square marker per cell.
-    lattice_vectors : (v1, v2), optional
-        Tile shape; estimated from the reference positions if omitted.
-    ax : matplotlib.axes.Axes, optional
-    cmap : str, optional
-        Default: cyclic for ``"angle"``, ``"viridis"`` for ``"magnitude"``,
-        ``"RdBu_r"`` for components.
-    clim : (float, float), optional
-    alpha : float, default 0.9
-    convention : {"cartesian", "image"}, default "cartesian"
-    colorbar_location : str, default "right"
-    scalebar_nm : float or "auto", optional
-    title : str, optional
+    quantity selects magnitude, angle, u or v.
+    kind selects tiles, interpolated or scatter rendering.
+    sampling is the pixel size in nm/px.
 
     Returns
     -------
     fig, ax
     """
     fig, ax = get_axes(ax)
+
     if image is not None:
         show_image(ax, image)
+
     xy = field.reference_xy
     k = 1.0 if sampling is None else sampling * _UNIT_FACTORS[unit]
     ulabel = "px" if sampling is None else unit
+
     if quantity == "magnitude":
         values = field.magnitude * k
         cmap = cmap or "viridis"
-        clim = clim or (0.0, float(np.nanpercentile(values, 99)) if len(values) else 1.0)
+
+        if clim is None:
+            clim = (
+                0.0,
+                float(np.nanpercentile(values, 99))
+                if len(values) else 1.0
+            )
+
         label = f"|displacement| ({ulabel})"
+
     elif quantity == "angle":
         values = field.angle(convention)
         cmap = cmap or CYCLIC_CMAP
         clim = (-180.0, 180.0)
         label = None
+
     elif quantity in ("u", "v"):
         values = getattr(field, quantity) * k
+
         if quantity == "v" and convention == "cartesian":
             values = -values
+
         cmap = cmap or "RdBu_r"
+
         if clim is None:
-            vmax = float(np.nanpercentile(np.abs(values), 99)) if len(values) else 1.0
+            vmax = (
+                float(np.nanpercentile(np.abs(values), 99))
+                if len(values) else 1.0
+            )
             clim = (-vmax, vmax)
-        direction = {"u": "x (right)",
-                     "v": "y (up)" if convention == "cartesian" else "y (down)"}
+
+        direction = {
+            "u": "x (right)",
+            "v": "y (up)" if convention == "cartesian" else "y (down)"
+        }
         label = f"displacement along {direction[quantity]} ({ulabel})"
+
     else:
-        raise ValueError("quantity must be 'magnitude', 'angle', 'u' or 'v'")
+        raise ValueError(
+            "quantity must be 'magnitude', 'angle', 'u' or 'v'"
+        )
 
     if kind == "tiles":
         if lattice_vectors is None:
-            lattice_vectors = estimate_lattice_vectors(xy) if len(xy) >= 4 else (
-                np.array([1.0, 0.0]), np.array([0.0, 1.0]))
-        v1, v2 = (np.asarray(v, dtype=float) for v in lattice_vectors)
-        mappable = PolyCollection(_tile_polygons(xy, v1, v2), array=values,
-                                  cmap=cmap, alpha=alpha, edgecolors="face",
-                                  linewidths=0.3)
+            lattice_vectors = (
+                estimate_lattice_vectors(xy)
+                if len(xy) >= 4
+                else (np.array([1.0, 0.0]), np.array([0.0, 1.0]))
+            )
+
+        v1, v2 = (
+            np.asarray(v, dtype=float)
+            for v in lattice_vectors
+        )
+
+        mappable = PolyCollection(
+            _tile_polygons(xy, v1, v2),
+            array=values,
+            cmap=cmap,
+            alpha=alpha,
+            edgecolors="face",
+            linewidths=0.3
+        )
         mappable.set_clim(*clim)
         ax.add_collection(mappable, autolim=True)
+
     elif kind == "interpolated":
         if image is not None:
             h, w = np.asarray(image).shape
             gx, gy = np.meshgrid(np.arange(w), np.arange(h))
         else:
-            gx, gy = np.meshgrid(np.arange(np.floor(xy[:, 0].min()),
-                                           np.ceil(xy[:, 0].max()) + 1),
-                                 np.arange(np.floor(xy[:, 1].min()),
-                                           np.ceil(xy[:, 1].max()) + 1))
+            gx, gy = np.meshgrid(
+                np.arange(
+                    np.floor(xy[:, 0].min()),
+                    np.ceil(xy[:, 0].max()) + 1
+                ),
+                np.arange(
+                    np.floor(xy[:, 1].min()),
+                    np.ceil(xy[:, 1].max()) + 1
+                )
+            )
+
         if quantity == "angle":
-            # interpolate unit vectors, not angles, to respect the wrap-around
+            # Interpolate unit vectors to respect angular wrap-around.
             rad = np.deg2rad(values)
-            c = griddata(xy, np.cos(rad), (gx, gy), method="linear")
-            s = griddata(xy, np.sin(rad), (gx, gy), method="linear")
+            c = griddata(
+                xy, np.cos(rad), (gx, gy), method="linear"
+            )
+            s = griddata(
+                xy, np.sin(rad), (gx, gy), method="linear"
+            )
             grid = np.degrees(np.arctan2(s, c))
         else:
-            grid = griddata(xy, values, (gx, gy), method="linear")
-        mappable = ax.imshow(grid, cmap=cmap, vmin=clim[0], vmax=clim[1],
-                             alpha=alpha, interpolation="nearest",
-                             extent=(gx.min() - 0.5, gx.max() + 0.5,
-                                     gy.max() + 0.5, gy.min() - 0.5))
+            grid = griddata(
+                xy, values, (gx, gy), method="linear"
+            )
+
+        mappable = ax.imshow(
+            grid,
+            cmap=cmap,
+            vmin=clim[0],
+            vmax=clim[1],
+            alpha=alpha,
+            interpolation="nearest",
+            extent=(
+                gx.min() - 0.5,
+                gx.max() + 0.5,
+                gy.max() + 0.5,
+                gy.min() - 0.5
+            )
+        )
+
     elif kind == "scatter":
-        mappable = ax.scatter(xy[:, 0], xy[:, 1], c=values, cmap=cmap, marker="s",
-                              s=40, vmin=clim[0], vmax=clim[1], alpha=alpha,
-                              edgecolors="none")
+        mappable = ax.scatter(
+            xy[:, 0], xy[:, 1],
+            c=values,
+            cmap=cmap,
+            marker="s",
+            s=40,
+            vmin=clim[0],
+            vmax=clim[1],
+            alpha=alpha,
+            edgecolors="none"
+        )
+
     else:
-        raise ValueError("kind must be 'tiles', 'interpolated' or 'scatter'")
+        raise ValueError(
+            "kind must be 'tiles', 'interpolated' or 'scatter'"
+        )
 
     _finish_axes(ax, image, title, sampling, scalebar_nm)
+
+    ax.set_title(
+        ax.get_title(),
+        fontsize=16,
+        fontweight="bold",
+        pad=12
+    )
+
     if quantity == "angle":
-        add_colorwheel(ax, cmap=cmap, convention=convention,
-                       label=f"direction ({convention})")
+        _reserve_colorbar_space(ax, colorbar_location)
+
+        wheel = add_colorwheel(
+            ax,
+            cmap=cmap,
+            convention=convention,
+            bounds=(0.76, 0.77, 0.19, 0.19),
+            label=""
+        )
+        wheel.tick_params(axis="x", labelsize=16, pad=2)
+
+        for text in wheel.get_xticklabels():
+            text.set_fontweight("bold")
+
     else:
-        add_colorbar(mappable, ax, label, location=colorbar_location)
+        cbar = add_colorbar(
+            mappable, ax, label,
+            location=colorbar_location,
+            size="4%",
+            pad=0.08
+        )
+        cbar.set_label(
+            label,
+            fontsize=16,
+            fontweight="bold",
+            labelpad=10
+        )
+        cbar.ax.tick_params(axis="both", labelsize=16)
+
+        for text in (
+            cbar.ax.get_xticklabels()
+            + cbar.ax.get_yticklabels()
+        ):
+            text.set_fontweight("bold")
+
+        for axis in (cbar.ax.xaxis, cbar.ax.yaxis):
+            axis.get_offset_text().set_fontsize(16)
+            axis.get_offset_text().set_fontweight("bold")
+
     return fig, ax
+
+    
 
 
 def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
                                  convention="cartesian", bins=30, axes=None,
                                  color_magnitude="tab:blue",
                                  color_angle="tab:green"):
-    """Magnitude histogram, orientation histogram and orientation rose.
+    """Show two stacked histograms and a larger orientation rose.
 
-    The same outlier rule as :func:`polarmap.statistics.describe_displacements`
-    is applied first.
-
-    Parameters
-    ----------
-    field : DisplacementField
-    sampling : float
-        nm/px.
-    n_mad : float, default 6
-    convention : {"cartesian", "image"}, default "cartesian"
-    bins : int, default 30
-        Magnitude bins (orientations use 10-degree bins).
-    axes : sequence of 3 Axes, optional
-        The last one must use a polar projection.
+    Existing axes retain their layout. The last axis must be polar.
 
     Returns
     -------
     fig, axes, descriptors
-        ``descriptors`` is the dict from ``describe_displacements``.
     """
-    desc = describe_displacements(field, sampling, n_mad=n_mad,
-                                  convention=convention)
+    from matplotlib.ticker import MaxNLocator, ScalarFormatter
+
+    desc = describe_displacements(
+        field, sampling,
+        n_mad=n_mad,
+        convention=convention
+    )
     mag = field.magnitude_in(sampling, "pm")[desc["kept"]]
     ang = field.angle(convention)[desc["kept"]]
+
     if axes is None:
-        fig = plt.figure(figsize=(15, 4.2))
-        axes = [fig.add_subplot(1, 3, 1), fig.add_subplot(1, 3, 2),
-                fig.add_subplot(1, 3, 3, projection="polar")]
+        fig = plt.figure(figsize=(18, 10), constrained_layout=True)
+        gs = fig.add_gridspec(
+            2, 2,
+            width_ratios=(1.0, 1.25)
+        )
+
+        axes = [
+            fig.add_subplot(gs[0, 0]),
+            fig.add_subplot(gs[1, 0]),
+            fig.add_subplot(gs[:, 1], projection="polar")
+        ]
     else:
         fig = axes[0].figure
+
     ax0, ax1, ax2 = axes
-    ax0.hist(mag, bins=bins, color=color_magnitude, edgecolor="k", alpha=0.8)
-    ax0.axvline(desc["median_pm"], color="r", ls="--", label="median")
+
+    # Magnitude histogram
+    ax0.hist(
+        mag, bins=bins,
+        color=color_magnitude,
+        edgecolor="k", alpha=0.8
+    )
+    ax0.axvline(
+        desc["median_pm"],
+        color="r", ls="--",
+        label="median"
+    )
     ax0.set_xlabel("displacement |d| (pm)")
     ax0.set_ylabel("count")
-    ax0.set_title("magnitude distribution")
+    ax0.set_title("magnitude distribution", pad=12)
     ax0.legend()
 
-    ax1.hist(np.mod(ang, 360), bins=np.arange(0, 361, 10), color=color_angle,
-             edgecolor="k", alpha=0.8)
+    # Fewer labels without changing histogram bins.
+    ax0.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    formatter = ScalarFormatter(useOffset=False)
+    ax0.xaxis.set_major_formatter(formatter)
+    ax0.yaxis.set_major_locator(
+        MaxNLocator(nbins=5, integer=True)
+    )
+
+    # Orientation histogram
+    ax1.hist(
+        np.mod(ang, 360),
+        bins=np.arange(0, 361, 10),
+        color=color_angle,
+        edgecolor="k", alpha=0.8
+    )
     ax1.set_xlabel(f"orientation ({convention}, deg)")
     ax1.set_ylabel("count")
     ax1.set_xticks([0, 90, 180, 270, 360])
-    ax1.set_title("orientation distribution")
+    ax1.set_xlim(-5, 365)
+    ax1.set_title("orientation distribution", pad=12)
+    ax1.yaxis.set_major_locator(
+        MaxNLocator(nbins=5, integer=True)
+    )
 
-    counts, edges = np.histogram(np.mod(np.deg2rad(ang), 2 * np.pi), bins=36,
-                                 range=(0, 2 * np.pi))
-    ax2.bar(0.5 * (edges[:-1] + edges[1:]), counts, width=2 * np.pi / 36,
-            color=color_angle, edgecolor="k", alpha=0.7)
+    # Orientation rose
+    counts, edges = np.histogram(
+        np.mod(np.deg2rad(ang), 2 * np.pi),
+        bins=36,
+        range=(0, 2 * np.pi)
+    )
+    ax2.bar(
+        0.5 * (edges[:-1] + edges[1:]),
+        counts,
+        width=2 * np.pi / 36,
+        color=color_angle,
+        edgecolor="k", alpha=0.7
+    )
     ax2.set_theta_zero_location("E")
-    ax2.set_theta_direction(1 if convention == "cartesian" else -1)
-    ax2.set_title("orientation rose", pad=15)
-    fig.tight_layout()
+    ax2.set_theta_direction(
+        1 if convention == "cartesian" else -1
+    )
+    ax2.set_title("orientation rose", pad=24)
+
+    # Limit radial labels and leave space above the tallest bar.
+    radial_max = max(1.0, float(counts.max()) * 1.12)
+    ax2.set_ylim(0, radial_max)
+
+    radial_locator = MaxNLocator(nbins=4, integer=True)
+    radial_ticks = radial_locator.tick_values(0, radial_max)
+    radial_ticks = radial_ticks[
+        (radial_ticks > 0) & (radial_ticks < radial_max)
+    ]
+    ax2.set_yticks(radial_ticks)
+    ax2.set_rlabel_position(22.5)
+    ax2.tick_params(axis="x", pad=10)
+    ax2.grid(alpha=0.5)
+
+    title_size = 20
+    label_size = 18
+    tick_size = 16
+    legend_size = 16
+
+    for ax in axes:
+        ax.title.set_fontsize(title_size)
+        ax.title.set_fontweight("bold")
+
+        for label in (ax.xaxis.label, ax.yaxis.label):
+            label.set_fontsize(label_size)
+            label.set_fontweight("bold")
+
+        ax.tick_params(
+            axis="both", which="both",
+            labelsize=tick_size
+        )
+
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_fontweight("bold")
+
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.get_offset_text().set_fontsize(tick_size)
+            axis.get_offset_text().set_fontweight("bold")
+
+        legend = ax.get_legend()
+        if legend is not None:
+            for text in legend.get_texts():
+                text.set_fontsize(legend_size)
+                text.set_fontweight("bold")
+
+            legend.get_title().set_fontsize(legend_size)
+            legend.get_title().set_fontweight("bold")
+
     return fig, axes, desc
 
 
