@@ -510,26 +510,28 @@ def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
         MaxNLocator(nbins=5, integer=True)
     )
 
-    # Orientation rose
+    # Orientation rose: radius represents the number of vectors.
     counts, edges = np.histogram(
         np.mod(np.deg2rad(ang), 2 * np.pi),
         bins=36,
         range=(0, 2 * np.pi)
     )
+
     ax2.bar(
         0.5 * (edges[:-1] + edges[1:]),
         counts,
-        width=2 * np.pi / 36,
+        width=np.diff(edges),
         color=color_angle,
-        edgecolor="k", alpha=0.7
+        edgecolor="k",
+        alpha=0.7
     )
+
     ax2.set_theta_zero_location("E")
     ax2.set_theta_direction(
         1 if convention == "cartesian" else -1
     )
-    ax2.set_title("orientation rose", pad=24)
+    ax2.set_title("orientation rose — count", pad=24)
 
-    # Limit radial labels and leave space above the tallest bar.
     radial_max = max(1.0, float(counts.max()) * 1.12)
     ax2.set_ylim(0, radial_max)
 
@@ -538,6 +540,7 @@ def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
     radial_ticks = radial_ticks[
         (radial_ticks > 0) & (radial_ticks < radial_max)
     ]
+
     ax2.set_yticks(radial_ticks)
     ax2.set_rlabel_position(22.5)
     ax2.tick_params(axis="x", pad=10)
@@ -579,6 +582,85 @@ def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
 
     return fig, axes, desc
 
+def plot_displacement_polar(field, sampling, *, n_mad=6.0,
+                            convention="cartesian", ax=None,
+                            color="tab:green", s=20, alpha=0.5):
+    """Plot displacement direction against magnitude in pm.
+
+    Each point represents one retained displacement vector.
+    Spatial positions are not represented.
+
+    Returns
+    -------
+    fig, ax, descriptors
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    desc = describe_displacements(
+        field, sampling,
+        n_mad=n_mad,
+        convention=convention
+    )
+
+    mag = field.magnitude_in(sampling, "pm")[desc["kept"]]
+    ang = field.angle(convention)[desc["kept"]]
+
+    valid = np.isfinite(mag) & np.isfinite(ang)
+    radii = mag[valid]
+    theta = np.mod(np.deg2rad(ang[valid]), 2 * np.pi)
+
+    if ax is None:
+        fig, ax = plt.subplots(
+            figsize=(9, 9),
+            dpi=120,
+            subplot_kw={"projection": "polar"},
+            constrained_layout=True
+        )
+    else:
+        if getattr(ax, "name", None) != "polar":
+            raise ValueError("ax must use a polar projection")
+        fig = ax.figure
+
+    ax.scatter(
+        theta, radii,
+        s=s,
+        color=color,
+        alpha=alpha,
+        edgecolors="none"
+    )
+
+    ax.set_theta_zero_location("E")
+    ax.set_theta_direction(
+        1 if convention == "cartesian" else -1
+    )
+
+    max_mag = float(radii.max()) if radii.size else 0.0
+    radial_max = 1.05 * max_mag if max_mag > 0 else 1.0
+    ax.set_ylim(0, radial_max)
+
+    locator = MaxNLocator(nbins=4)
+    ticks = locator.tick_values(0, radial_max)
+    ticks = ticks[(ticks > 0) & (ticks < radial_max)]
+
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{value:g} pm" for value in ticks])
+    ax.set_rlabel_position(22.5)
+
+    ax.set_title(
+        "displacement magnitude and direction",
+        fontsize=20,
+        fontweight="bold",
+        pad=24
+    )
+    ax.tick_params(axis="both", labelsize=16)
+    ax.tick_params(axis="x", pad=10)
+
+    for text in ax.get_xticklabels() + ax.get_yticklabels():
+        text.set_fontweight("bold")
+
+    ax.grid(alpha=0.5)
+
+    return fig, ax, desc
 
 def plot_magnitude_agreement(comparison, *, ax=None, labels=("polarmap", "VecMap"),
                              title=None):
