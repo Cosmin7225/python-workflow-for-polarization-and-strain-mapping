@@ -7,9 +7,6 @@ import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
 from scipy.interpolate import griddata
-from matplotlib.axes import Axes
-from matplotlib.text import Text
-
 from ..lattice import estimate_lattice_vectors
 from ..statistics import describe_displacements
 from ._common import (CYCLIC_CMAP, add_colorbar, add_colorwheel, add_scalebar,
@@ -429,8 +426,6 @@ def plot_displacement_map(field, quantity="magnitude", *, image=None,
     return fig, ax
 
     
-
-
 def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
                                  convention="cartesian", bins=30, axes=None,
                                  color_magnitude="tab:blue",
