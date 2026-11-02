@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import matplotlib.patches as mpatches
 from scipy.spatial import KDTree
 import matplotlib.pyplot as plt
 
