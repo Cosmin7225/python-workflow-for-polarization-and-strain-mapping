@@ -424,6 +424,7 @@ def plot_displacement_map(field, quantity="magnitude", *, image=None,
             axis.get_offset_text().set_fontweight("bold")
 
     return fig, ax
+
     
 def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
                                  convention="cartesian", bins=30, axes=None,
