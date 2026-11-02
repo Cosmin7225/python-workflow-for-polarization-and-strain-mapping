@@ -257,6 +257,7 @@ def add_colorwheel(ax, cmap=None, convention="cartesian",
     theta = np.linspace(-np.pi, np.pi, 361)
     radius = np.array([0.55, 1.0])
     values = np.degrees(theta)[:-1][None, :]
+    wax.grid(False)
     wax.pcolormesh(theta, radius, values, cmap=cmap, vmin=-180, vmax=180,
                    shading="flat")
     wax.set_yticks([])
