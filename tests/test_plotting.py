@@ -61,7 +61,9 @@ def test_displacement_maps(perov100, field, quantity, kind):
                                        sampling=0.016, kind=kind,
                                        colorbar_location="bottom")
     if quantity == "angle":                    # inset colour wheel, no colour bar
-        assert len(fig.axes) == 1 and len(ax.child_axes) == 1
+        assert len(fig.axes) == 2
+        assert not fig.axes[1].axison
+        assert len(ax.child_axes) == 1
         assert ax.child_axes[0].name == "polar"
     else:                                      # map + appended colour bar
         assert len(fig.axes) == 2
