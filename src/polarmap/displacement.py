@@ -1,733 +1,696 @@
-"""Projected atomic-column displacement mapping.
-
-A displacement map is always *the position of a target (polar) column minus the
-position it would occupy in a centrosymmetric reference*. The column
-localisation (:mod:`polarmap.columns`) is generic; what depends on the crystal
-structure and projection is how that reference position is built from the
-surrounding reference columns. This module implements the reference models:
-
-* **perovskite [100]**: four A columns forming a complete cage; the ideal
-  target position is the centroid of the four measured corners
-  (:func:`measure_cage_displacement`);
-* **perovskite [110]**: two A columns along the projected polar axis (a
-  complete pair); the ideal position is ``(1 - f) r0 + f r1`` with ``f = 1/2``
-  (:func:`measure_pair_displacement`);
-* **wurtzite-like dumbbells**: one reference column; the ideal position is the
-  reference plus a fixed basis offset (:func:`displacement_from_offset`).
-
-The measured quantity is an image-derived displacement (pixels, or pm after
-multiplication by the sampling). It is **not** an absolute polarization; see
-:func:`displacement_to_polarization` for a semi-quantitative conversion.
-
-All functions return a :class:`DisplacementField`. Displacements are given in
-image axes (``u`` right, ``v`` down) and point *from the reference position to
-the measured target column*.
-"""
+"""Figures for displacement fields: arrow maps, colour maps and statistics."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-
 import numpy as np
-from scipy.spatial import KDTree
-
-from .columns import (as_bright_atoms, refine_com, refine_gaussian,
-                      remove_columns_gaussian)
-from .geometry import inside_image
-from .statistics import displacement_angle
+import matplotlib.patheffects as pe
+import matplotlib.pyplot as plt
+from matplotlib.collections import PolyCollection
+from scipy.interpolate import griddata
+from ..lattice import estimate_lattice_vectors
+from ..statistics import describe_displacements
+from ._common import (CYCLIC_CMAP, add_colorbar, add_colorwheel, add_scalebar,
+                      get_axes, show_image)
 
 __all__ = [
-    "DisplacementField",
-    "predict_second_sublattice",
-    "find_complete_perovskite_cages",
-    "measure_cage_displacement",
-    "find_complete_reference_pairs",
-    "local_residual_maxima",
-    "measure_pair_displacement",
-    "displacement_from_sublattices",
-    "displacement_from_cage",
-    "displacement_from_offset",
-    "displacement_to_polarization",
+    "plot_displacement_vectors",
+    "plot_displacement_map",
+    "plot_displacement_statistics",
+    "plot_magnitude_agreement",
 ]
 
-
-# ----------------------------------------------------------------------------
-# Result container
-# ----------------------------------------------------------------------------
-@dataclass
-class DisplacementField:
-    """A set of displacement vectors anchored at reference positions.
-
-    Attributes
-    ----------
-    x, y : numpy.ndarray
-        Reference (ideal, centrosymmetric) positions in pixels.
-    u, v : numpy.ndarray
-        Displacement components in pixels, image axes (``v`` positive down):
-        ``(u, v) = measured target - reference``.
-    per_site : dict of numpy.ndarray
-        Optional per-vector data with the same length (e.g. ``amplitude``,
-        ``corner_indices``). Subsetting keeps them aligned.
-    diagnostics : dict
-        Optional extra information that is not per vector (e.g. the residual
-        image the target columns were fitted on).
-    """
-
-    x: np.ndarray
-    y: np.ndarray
-    u: np.ndarray
-    v: np.ndarray
-    per_site: dict = field(default_factory=dict)
-    diagnostics: dict = field(default_factory=dict)
-
-    def __post_init__(self):
-        self.x = np.asarray(self.x, dtype=float).ravel()
-        self.y = np.asarray(self.y, dtype=float).ravel()
-        self.u = np.asarray(self.u, dtype=float).ravel()
-        self.v = np.asarray(self.v, dtype=float).ravel()
-        n = len(self.x)
-        if not len(self.y) == len(self.u) == len(self.v) == n:
-            raise ValueError("x, y, u and v must have the same length")
-        for key, value in self.per_site.items():
-            if len(value) != n:
-                raise ValueError(f"per_site[{key!r}] has length {len(value)}, "
-                                 f"expected {n}")
-
-    def __len__(self):
-        return len(self.x)
-
-    @property
-    def reference_xy(self):
-        """``(N, 2)`` reference positions."""
-        return np.column_stack([self.x, self.y])
-
-    @property
-    def target_xy(self):
-        """``(N, 2)`` measured target positions (reference + displacement)."""
-        return np.column_stack([self.x + self.u, self.y + self.v])
-
-    @property
-    def magnitude(self):
-        """Displacement magnitude in pixels."""
-        return np.hypot(self.u, self.v)
-
-    def magnitude_in(self, sampling, unit="pm"):
-        """Displacement magnitude in physical units.
-
-        Parameters
-        ----------
-        sampling : float
-            Pixel size in nm/px.
-        unit : {"pm", "nm", "angstrom"}, default "pm"
-        """
-        factor = {"pm": 1e3, "nm": 1.0, "angstrom": 10.0}[unit]
-        return self.magnitude * sampling * factor
-
-    def angle(self, convention="cartesian", degrees=True):
-        """Displacement orientation; see :func:`polarmap.statistics.displacement_angle`."""
-        return displacement_angle(self.u, self.v, convention=convention,
-                                  degrees=degrees)
-
-    def subset(self, mask):
-        """Return a new field with only the vectors selected by ``mask``."""
-        mask = np.asarray(mask)
-        return DisplacementField(
-            self.x[mask], self.y[mask], self.u[mask], self.v[mask],
-            per_site={k: np.asarray(val)[mask] for k, val in self.per_site.items()},
-            diagnostics=dict(self.diagnostics))
-
-    def with_sign(self, sign):
-        """Return a copy with the displacement multiplied by ``sign`` (±1)."""
-        if sign not in (1, -1):
-            raise ValueError("sign must be +1 or -1")
-        return DisplacementField(self.x, self.y, sign * self.u, sign * self.v,
-                                 per_site=dict(self.per_site),
-                                 diagnostics=dict(self.diagnostics))
-
-    def to_csv(self, path, sampling=None, convention="cartesian"):
-        """Write the field to a CSV file.
-
-        Columns: reference and target positions (px), displacement components
-        and magnitude (px), orientation (deg, given ``convention``) and, if
-        ``sampling`` is given, the components and magnitude in pm.
-        """
-        cols = [self.x, self.y, self.x + self.u, self.y + self.v,
-                self.u, self.v, self.magnitude, self.angle(convention)]
-        names = ["x_ref_px", "y_ref_px", "x_target_px", "y_target_px",
-                 "u_px", "v_px", "magnitude_px", f"angle_{convention}_deg"]
-        if sampling is not None:
-            k = sampling * 1e3
-            cols += [self.u * k, self.v * k, self.magnitude * k]
-            names += ["u_pm", "v_pm", "magnitude_pm"]
-        np.savetxt(path, np.column_stack(cols), delimiter=",",
-                   header=",".join(names), comments="", fmt="%.6f")
-
-    @classmethod
-    def from_csv(cls, path):
-        """Read a field written by :meth:`to_csv`."""
-        data = np.genfromtxt(path, delimiter=",", names=True)
-        data = np.atleast_1d(data)
-        return cls(data["x_ref_px"], data["y_ref_px"], data["u_px"], data["v_px"])
+_UNIT_FACTORS = {"pm": 1e3, "nm": 1.0}
 
 
-# ----------------------------------------------------------------------------
-# Perovskite [100]: complete four-corner cages
-# ----------------------------------------------------------------------------
-def predict_second_sublattice(A, v1, v2, offset=(0.5, 0.5)):
-    """Ideal second-sublattice positions from a global lattice.
-
-    ``A + offset[0] * v1 + offset[1] * v2`` for every reference column. This
-    extrapolates the *average* lattice and is kept for diagnostics; prefer the
-    complete-cage reference, which uses the measured local cage instead.
-
-    Parameters
-    ----------
-    A : array_like
-        ``(N, 2)`` reference column positions.
-    v1, v2 : array_like
-        Lattice vectors.
-    offset : (float, float), default (0.5, 0.5)
-        Fractional position of the second sublattice in the cell; ``(0.5, 0.5)``
-        is the body centre (B site of a perovskite [100] projection).
-    """
-    A = np.asarray(A, dtype=float)
-    return A + offset[0] * np.asarray(v1, float) + offset[1] * np.asarray(v2, float)
+def _magnitude(field, sampling, unit):
+    if sampling is None:
+        return field.magnitude, "px"
+    return field.magnitude * sampling * _UNIT_FACTORS[unit], unit
 
 
-def find_complete_perovskite_cages(A, v1, v2, tolerance=None):
-    """Find all complete four-corner A cages and their measured centroids.
+def _finish_axes(ax, image, title, sampling, scalebar_nm):
+    if image is not None:
+        h, w = np.asarray(image).shape
+        ax.set_xlim(-0.5, w - 0.5)
+        ax.set_ylim(h - 0.5, -0.5)
+    else:
+        ax.autoscale_view()
+        if not ax.yaxis_inverted():          # image convention: y down
+            ax.invert_yaxis()
+    ax.set_aspect("equal")
+    ax.axis("off")
+    if title:
+        ax.set_title(title)
+    if scalebar_nm is not None:
+        if sampling is None:
+            raise ValueError("a scale bar needs the sampling (nm/px)")
+        add_scalebar(ax, sampling, None if scalebar_nm == "auto" else scalebar_nm,
+                     color="black" if image is None else "white")
 
-    For every A column taken as anchor ``A0``, the expected cage corners are
-    ``A0``, ``A0 + v1``, ``A0 + v2`` and ``A0 + v1 + v2``. A cage is accepted
-    only if a measured A column lies within ``tolerance`` of every expected
-    corner, the four matched columns are distinct, and their centroid lies
-    within ``tolerance`` of ``A0 + (v1 + v2) / 2``. The reference position is
-    the centroid of the **four measured** corners, so edge cells, vacancies and
-    missed columns are rejected automatically instead of producing a false
-    reference.
 
-    Parameters
-    ----------
-    A : array_like
-        ``(N, 2)`` refined A-column positions (one sublattice only).
-    v1, v2 : array_like
-        Primitive A-A lattice vectors.
-    tolerance : float, optional
-        Maximum corner mismatch in pixels; default ``0.28 * min(|v1|, |v2|)``.
-        Must be smaller than half the lattice spacing. Increase slightly
-        (e.g. to 0.30-0.35 of the spacing) for strongly strained data.
+def _reserve_colorbar_space(ax, location="right"):
+    """Reserve the same space as a colour bar without displaying one."""
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+    divider = make_axes_locatable(ax)
+    empty_ax = divider.append_axes(location, size="4%", pad=0.08)
+    empty_ax.set_axis_off()
+
+
+def plot_displacement_vectors(field, image=None, *, color_by="angle",
+                              sampling=None, unit="pm", ax=None, scale=10.0,
+                              uniform_length=False, cmap=None, color="k",
+                              halo="w", width=0.004, stroke=1.2,
+                              convention="cartesian", colorbar_location="right",
+                              scalebar_nm=None, dim_image=True, title=None,
+                              clim=None):
+    """Draw displacement vectors as arrows over the image.
+
+    scale controls visual arrow magnification.
+    uniform_length displays nonzero vectors with the median magnitude.
+    Arrows are clipped at the axes boundary without changing field data.
 
     Returns
     -------
-    centres : numpy.ndarray
-        ``(M, 2)`` cage centroids.
-    corner_indices : numpy.ndarray
-        ``(M, 4)`` indices into ``A`` of the corners, ordered ``A0``,
-        ``A0 + v1``, ``A0 + v2``, ``A0 + v1 + v2``.
+    fig, ax
     """
-    A = np.asarray(A, dtype=float)
-    v1 = np.asarray(v1, dtype=float)
-    v2 = np.asarray(v2, dtype=float)
-    if A.ndim != 2 or A.shape[1] != 2:
-        raise ValueError("A must have shape (N, 2) with (x, y) coordinates")
-    empty = (np.empty((0, 2)), np.empty((0, 4), dtype=int))
-    if len(A) < 4:
-        return empty
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("scale must be a positive finite number")
 
-    a_min = min(np.linalg.norm(v1), np.linalg.norm(v2))
-    if not np.isfinite(a_min) or a_min <= 0:
-        raise ValueError("v1 and v2 must be finite, non-zero lattice vectors")
-    tolerance = 0.28 * a_min if tolerance is None else float(tolerance)
-    if tolerance <= 0 or tolerance >= 0.5 * a_min:
-        raise ValueError("tolerance must be positive and smaller than half the "
-                         "lattice spacing")
+    fig, ax = get_axes(ax)
 
-    tree = KDTree(A)
-    offsets = np.array([[0.0, 0.0], v1, v2, v1 + v2])
-    cages = {}
-    for anchor in A:
-        dist, idx = tree.query(anchor + offsets, k=1)
-        idx = np.asarray(idx, dtype=int)
-        if np.any(dist > tolerance) or np.unique(idx).size != 4:
-            continue
-        centre = A[idx].mean(axis=0)
-        if np.linalg.norm(centre - (anchor + 0.5 * (v1 + v2))) > tolerance:
-            continue
-        cages.setdefault(tuple(sorted(idx.tolist())), (centre, idx))
-    if not cages:
-        return empty
-    centres = np.vstack([c for c, _ in cages.values()])
-    corners = np.vstack([i for _, i in cages.values()]).astype(int)
-    return centres, corners
+    if image is not None:
+        show_image(ax, image, dim=dim_image)
+
+    u, v = field.u.copy(), field.v.copy()
+
+    if uniform_length:
+        norm = np.hypot(u, v)
+        norm[norm == 0] = 1.0
+        length = np.median(np.hypot(field.u, field.v))
+        u, v = u / norm * length, v / norm * length
+
+    kw = dict(
+        angles="xy",
+        scale_units="xy",
+        scale=1.0 / scale,
+        width=width,
+        headwidth=4,
+        headlength=5,
+        headaxislength=4,
+        clip_on=True
+    )
+
+    if color_by == "angle":
+        cmap = CYCLIC_CMAP if cmap is None else cmap
+
+        q = ax.quiver(
+            field.x, field.y, u, v, field.angle(convention),
+            cmap=cmap, clim=(-180, 180), **kw
+        )
+        q.set_path_effects([
+            pe.withStroke(linewidth=stroke, foreground="k")
+        ])
+
+        _finish_axes(ax, image, title, sampling, scalebar_nm)
+        _reserve_colorbar_space(ax, colorbar_location)
+
+        wheel = add_colorwheel(
+            ax,
+            cmap=cmap,
+            convention=convention,
+            bounds=(0.76, 0.77, 0.19, 0.19),
+            label=""
+        )
+        wheel.tick_params(axis="x", labelsize=16, pad=2)
+
+        for text in wheel.get_xticklabels():
+            text.set_fontweight("bold")
+
+    elif color_by == "magnitude":
+        cmap = "plasma" if cmap is None else cmap
+        mag, label = _magnitude(field, sampling, unit)
+
+        if clim is None:
+            clim = (
+                0.0,
+                float(np.nanpercentile(mag, 95)) if mag.size else 1.0
+            )
+
+        q = ax.quiver(
+            field.x, field.y, u, v, mag,
+            cmap=cmap, clim=clim, **kw
+        )
+        q.set_path_effects([
+            pe.withStroke(linewidth=stroke, foreground="k")
+        ])
+
+        _finish_axes(ax, image, title, sampling, scalebar_nm)
+
+        cbar = add_colorbar(
+            q, ax, f"|displacement| ({label})",
+            location=colorbar_location,
+            size="4%",
+            pad=0.08
+        )
+        cbar.set_label(
+            f"|displacement| ({label})",
+            fontsize=16,
+            fontweight="bold",
+            labelpad=10
+        )
+        cbar.ax.tick_params(axis="both", labelsize=16)
+
+        for text in (
+            cbar.ax.get_xticklabels()
+            + cbar.ax.get_yticklabels()
+        ):
+            text.set_fontweight("bold")
+
+        for axis in (cbar.ax.xaxis, cbar.ax.yaxis):
+            axis.get_offset_text().set_fontsize(16)
+            axis.get_offset_text().set_fontweight("bold")
+
+    elif color_by is None:
+        q = ax.quiver(
+            field.x, field.y, u, v,
+            color=color, **kw
+        )
+        q.set_path_effects([
+            pe.withStroke(linewidth=stroke, foreground=halo)
+        ])
+
+        _finish_axes(ax, image, title, sampling, scalebar_nm)
+        _reserve_colorbar_space(ax, colorbar_location)
+
+    else:
+        raise ValueError("color_by must be 'angle', 'magnitude' or None")
+
+    ax.set_title(
+        ax.get_title(),
+        fontsize=16,
+        fontweight="bold",
+        pad=12
+    )
+
+    if image is not None:
+        h, w = np.asarray(image).shape
+        ax.set_xlim(-0.5, w - 0.5)
+        ax.set_ylim(h - 0.5, -0.5)
+
+    ax.set_autoscale_on(False)
+    q.set_clip_on(True)
+    q.set_clip_path(ax.patch)
+    q.set_clip_box(ax.bbox)
+
+    return fig, ax
 
 
-def measure_cage_displacement(image, A, v1, v2, *, image_mode="ADF",
-                              reference="complete_cage", refine="gaussian",
-                              box=None, edge=None, subtract_reference=True,
-                              cage_tolerance=None, offset=(0.5, 0.5),
-                              max_displacement=0.34, min_amplitude=0.30,
-                              sign=1):
-    """Measure the displacement of the central column of each A cage.
+def _tile_polygons(xy, v1, v2):
+    corners = np.array([
+        -0.5 * v1 - 0.5 * v2,
+         0.5 * v1 - 0.5 * v2,
+         0.5 * v1 + 0.5 * v2,
+        -0.5 * v1 + 0.5 * v2
+    ])
+    return xy[:, None, :] + corners[None, :, :]
 
-    Procedure (perovskite [100] projection):
 
-    1. **Reference subtraction** -- a 2-D Gaussian is fitted to every A column
-       and subtracted (:func:`~polarmap.columns.remove_columns_gaussian`,
-       window half-width ``max(4, 0.45 * cell)``), so the tails of the bright A
-       columns do not bias the weak central column.
-    2. **Reference positions** -- centroids of complete four-corner cages
-       (:func:`find_complete_perovskite_cages`).
-    3. **Target refinement** -- the central (B) column is refined on the
-       residual image, starting from the cage centroid, by a 2-D Gaussian fit
-       (or centre of mass) in a window of half-width ``box``.
-    4. **Quality control** -- a vector is kept only if the fit converged, the
-       displacement is smaller than ``max_displacement * cell`` and (Gaussian
-       fits) the amplitude exceeds ``min_amplitude`` times the median
-       amplitude.
+def plot_displacement_map(field, quantity="magnitude", *, image=None,
+                          sampling=None, unit="pm", kind="tiles",
+                          lattice_vectors=None, ax=None, cmap=None, clim=None,
+                          alpha=0.9, convention="cartesian",
+                          colorbar_location="right", scalebar_nm=None,
+                          title=None):
+    """Colour map of one displacement quantity, without arrows.
 
-    Here ``cell = (|v1| + |v2|) / 2``.
-
-    Parameters
-    ----------
-    image : array_like
-        2-D image.
-    A : array_like
-        ``(N, 2)`` refined A-column positions.
-    v1, v2 : array_like
-        Primitive A-A lattice vectors.
-    image_mode : str, default "ADF"
-        See :func:`polarmap.columns.as_bright_atoms`.
-    reference : {"complete_cage", "anchor"}, default "complete_cage"
-        ``"anchor"`` uses :func:`predict_second_sublattice` (global lattice
-        extrapolation) and is intended only for diagnostic comparison.
-    refine : {"gaussian", "com"}, default "gaussian"
-        Target refinement method.
-    box : int, optional
-        Target fitting half-width; default ``max(3, round(0.30 * cell))``.
-    edge : float, optional
-        Cages closer than this to the border are skipped so that the fitting
-        window stays inside the image; default ``box + 1``.
-    subtract_reference : bool, default True
-        Perform step 1.
-    cage_tolerance : float, optional
-        See :func:`find_complete_perovskite_cages`.
-    offset : (float, float), default (0.5, 0.5)
-        Only used with ``reference="anchor"``.
-    max_displacement : float, default 0.34
-        Maximum accepted displacement as a fraction of ``cell``.
-    min_amplitude : float, default 0.30
-        Minimum fitted amplitude relative to the median (Gaussian fits only).
-    sign : {1, -1}, default 1
-        Multiply the displacements by this sign (``-1`` reverses the arrow
-        convention, e.g. to show the direction opposite to the cation shift).
+    quantity selects magnitude, angle, u or v.
+    kind selects tiles, interpolated or scatter rendering.
+    sampling is the pixel size in nm/px.
 
     Returns
     -------
-    DisplacementField
-        ``per_site`` holds ``corner_indices`` (``(M, 4)``, ``-1`` for the
-        anchor reference) and, for Gaussian fits, ``amplitude``;
-        ``diagnostics["residual"]`` is the image the targets were fitted on.
+    fig, ax
     """
-    img = as_bright_atoms(image, image_mode)
-    h, w = img.shape
-    A = np.asarray(A, dtype=float)
-    v1 = np.asarray(v1, dtype=float)
-    v2 = np.asarray(v2, dtype=float)
-    cell = 0.5 * (np.linalg.norm(v1) + np.linalg.norm(v2))
-    if box is None:
-        box = max(3, int(round(0.30 * cell)))
-    if edge is None:
-        edge = box + 1
+    fig, ax = get_axes(ax)
 
-    if subtract_reference:
-        ref_box = max(4, int(round(0.45 * cell)))
-        work = remove_columns_gaussian(img, A, box=ref_box, image_mode="ADF")
+    if image is not None:
+        show_image(ax, image)
+
+    xy = field.reference_xy
+    k = 1.0 if sampling is None else sampling * _UNIT_FACTORS[unit]
+    ulabel = "px" if sampling is None else unit
+
+    if quantity == "magnitude":
+        values = field.magnitude * k
+        cmap = cmap or "viridis"
+
+        if clim is None:
+            clim = (
+                0.0,
+                float(np.nanpercentile(values, 99))
+                if len(values) else 1.0
+            )
+
+        label = f"|displacement| ({ulabel})"
+
+    elif quantity == "angle":
+        values = field.angle(convention)
+        cmap = cmap or CYCLIC_CMAP
+        clim = (-180.0, 180.0)
+        label = None
+
+    elif quantity in ("u", "v"):
+        values = getattr(field, quantity) * k
+
+        if quantity == "v" and convention == "cartesian":
+            values = -values
+
+        cmap = cmap or "RdBu_r"
+
+        if clim is None:
+            vmax = (
+                float(np.nanpercentile(np.abs(values), 99))
+                if len(values) else 1.0
+            )
+            clim = (-vmax, vmax)
+
+        direction = {
+            "u": "x (right)",
+            "v": "y (up)" if convention == "cartesian" else "y (down)"
+        }
+        label = f"displacement along {direction[quantity]} ({ulabel})"
+
     else:
-        work = img
+        raise ValueError(
+            "quantity must be 'magnitude', 'angle', 'u' or 'v'"
+        )
 
-    if reference == "complete_cage":
-        ideal, corners = find_complete_perovskite_cages(A, v1, v2,
-                                                        tolerance=cage_tolerance)
-    elif reference == "anchor":
-        ideal = predict_second_sublattice(A, v1, v2, offset)
-        corners = np.full((len(ideal), 4), -1, dtype=int)
-    else:
-        raise ValueError("reference must be 'complete_cage' or 'anchor'")
-    if len(ideal) == 0:
-        raise RuntimeError(
-            "No complete cages were found. Check that A contains only one "
-            "sublattice, that v1/v2 are primitive A-A vectors, and increase "
-            "cage_tolerance slightly if necessary.")
+    if kind == "tiles":
+        if lattice_vectors is None:
+            lattice_vectors = (
+                estimate_lattice_vectors(xy)
+                if len(xy) >= 4
+                else (np.array([1.0, 0.0]), np.array([0.0, 1.0]))
+            )
 
-    inside = inside_image(ideal, (h, w), margin=edge)
-    ideal, corners = ideal[inside], corners[inside]
-    if len(ideal) == 0:
-        raise RuntimeError("All cages were removed by the fitting-window edge "
-                           "filter; reduce `edge` or `box`.")
+        v1, v2 = (
+            np.asarray(v, dtype=float)
+            for v in lattice_vectors
+        )
 
-    per_site = {"corner_indices": corners}
-    if refine == "gaussian":
-        found, params = refine_gaussian(work, ideal, box=box, image_mode="ADF",
-                                        return_params=True)
-        amp = params["amplitude"]
-        per_site["amplitude"] = amp
-    elif refine == "com":
-        found = refine_com(work, ideal, box=box, image_mode="ADF")
-        amp = None
-    else:
-        raise ValueError("refine must be 'gaussian' or 'com'")
+        mappable = PolyCollection(
+            _tile_polygons(xy, v1, v2),
+            array=values,
+            cmap=cmap,
+            alpha=alpha,
+            edgecolors="face",
+            linewidths=0.3
+        )
+        mappable.set_clim(*clim)
+        ax.add_collection(mappable, autolim=True)
 
-    disp = found - ideal
-    good = (np.isfinite(found).all(axis=1)
-            & (np.hypot(disp[:, 0], disp[:, 1]) < max_displacement * cell))
-    if amp is not None:
-        amp_ok = good & np.isfinite(amp) & (amp > 0)
-        if amp_ok.any():
-            good &= np.isfinite(amp) & (amp > min_amplitude * np.median(amp[amp_ok]))
+    elif kind == "interpolated":
+        if image is not None:
+            h, w = np.asarray(image).shape
+            gx, gy = np.meshgrid(np.arange(w), np.arange(h))
         else:
-            good &= False
+            gx, gy = np.meshgrid(
+                np.arange(
+                    np.floor(xy[:, 0].min()),
+                    np.ceil(xy[:, 0].max()) + 1
+                ),
+                np.arange(
+                    np.floor(xy[:, 1].min()),
+                    np.ceil(xy[:, 1].max()) + 1
+                )
+            )
 
-    result = DisplacementField(ideal[:, 0], ideal[:, 1], disp[:, 0], disp[:, 1],
-                               per_site=per_site,
-                               diagnostics={"residual": work, "cell": cell,
-                                            "box": box, "reference": reference})
-    return result.subset(good).with_sign(sign)
+        if quantity == "angle":
+            # Interpolate unit vectors to respect angular wrap-around.
+            rad = np.deg2rad(values)
+            c = griddata(
+                xy, np.cos(rad), (gx, gy), method="linear"
+            )
+            s = griddata(
+                xy, np.sin(rad), (gx, gy), method="linear"
+            )
+            grid = np.degrees(np.arctan2(s, c))
+        else:
+            grid = griddata(
+                xy, values, (gx, gy), method="linear"
+            )
+
+        mappable = ax.imshow(
+            grid,
+            cmap=cmap,
+            vmin=clim[0],
+            vmax=clim[1],
+            alpha=alpha,
+            interpolation="nearest",
+            extent=(
+                gx.min() - 0.5,
+                gx.max() + 0.5,
+                gy.max() + 0.5,
+                gy.min() - 0.5
+            )
+        )
+
+    elif kind == "scatter":
+        mappable = ax.scatter(
+            xy[:, 0], xy[:, 1],
+            c=values,
+            cmap=cmap,
+            marker="s",
+            s=40,
+            vmin=clim[0],
+            vmax=clim[1],
+            alpha=alpha,
+            edgecolors="none"
+        )
+
+    else:
+        raise ValueError(
+            "kind must be 'tiles', 'interpolated' or 'scatter'"
+        )
+
+    _finish_axes(ax, image, title, sampling, scalebar_nm)
+
+    ax.set_title(
+        ax.get_title(),
+        fontsize=16,
+        fontweight="bold",
+        pad=12
+    )
+
+    if quantity == "angle":
+        _reserve_colorbar_space(ax, colorbar_location)
+
+        wheel = add_colorwheel(
+            ax,
+            cmap=cmap,
+            convention=convention,
+            bounds=(0.76, 0.77, 0.19, 0.19),
+            label=""
+        )
+        wheel.tick_params(axis="x", labelsize=16, pad=2)
+
+        for text in wheel.get_xticklabels():
+            text.set_fontweight("bold")
+
+    else:
+        cbar = add_colorbar(
+            mappable, ax, label,
+            location=colorbar_location,
+            size="4%",
+            pad=0.08
+        )
+        cbar.set_label(
+            label,
+            fontsize=16,
+            fontweight="bold",
+            labelpad=10
+        )
+        cbar.ax.tick_params(axis="both", labelsize=16)
+
+        for text in (
+            cbar.ax.get_xticklabels()
+            + cbar.ax.get_yticklabels()
+        ):
+            text.set_fontweight("bold")
+
+        for axis in (cbar.ax.xaxis, cbar.ax.yaxis):
+            axis.get_offset_text().set_fontsize(16)
+            axis.get_offset_text().set_fontweight("bold")
+
+    return fig, ax
 
 
-# ----------------------------------------------------------------------------
-# Perovskite [110] and other two-column references: complete pairs
-# ----------------------------------------------------------------------------
-def find_complete_reference_pairs(reference_xy, pair_vector,
-                                  reference_fraction=0.5, tolerance=None):
-    """Build ideal target positions from complete two-column pairs.
+def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
+                                 convention="cartesian", bins=30, axes=None,
+                                 color_magnitude="tab:blue",
+                                 color_angle="tab:green"):
+    """Show two stacked histograms and a larger orientation rose.
 
-    For every reference column ``r0`` the column nearest to
-    ``r0 + pair_vector`` is accepted as partner ``r1`` if it lies within
-    ``tolerance`` of that point (and on the positive side). The ideal target
-    position is interpolated between the **two measured** endpoints,
+    Existing axes retain their layout. The last axis must be polar.
 
-    .. math:: \\mathbf{r}_\\mathrm{ideal} = (1 - f)\\,\\mathbf{r}_0 + f\\,\\mathbf{r}_1,
+    Returns
+    -------
+    fig, axes, descriptors
+    """
+    from matplotlib.ticker import MaxNLocator, ScalarFormatter
 
-    so an edge column or a missing neighbour cannot create a false reference.
+    desc = describe_displacements(
+        field, sampling,
+        n_mad=n_mad,
+        convention=convention
+    )
+    mag = field.magnitude_in(sampling, "pm")[desc["kept"]]
+    ang = field.angle(convention)[desc["kept"]]
+
+    if axes is None:
+        fig = plt.figure(figsize=(18, 10), constrained_layout=True)
+        gs = fig.add_gridspec(
+            2, 2,
+            width_ratios=(1.0, 1.25)
+        )
+
+        axes = [
+            fig.add_subplot(gs[0, 0]),
+            fig.add_subplot(gs[1, 0]),
+            fig.add_subplot(gs[:, 1], projection="polar")
+        ]
+    else:
+        fig = axes[0].figure
+
+    ax0, ax1, ax2 = axes
+
+    # Magnitude histogram
+    ax0.hist(
+        mag, bins=bins,
+        color=color_magnitude,
+        edgecolor="k", alpha=0.8
+    )
+    ax0.axvline(
+        desc["median_pm"],
+        color="r", ls="--",
+        label="median"
+    )
+    ax0.set_xlabel("displacement |d| (pm)")
+    ax0.set_ylabel("count")
+    ax0.set_title("magnitude distribution", pad=12)
+    ax0.legend()
+
+    # Fewer labels without changing histogram bins.
+    ax0.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    formatter = ScalarFormatter(useOffset=False)
+    ax0.xaxis.set_major_formatter(formatter)
+    ax0.yaxis.set_major_locator(
+        MaxNLocator(nbins=5, integer=True)
+    )
+
+    # Orientation histogram
+    ax1.hist(
+        np.mod(ang, 360),
+        bins=np.arange(0, 361, 10),
+        color=color_angle,
+        edgecolor="k", alpha=0.8
+    )
+    ax1.set_xlabel(f"orientation ({convention}, deg)")
+    ax1.set_ylabel("count")
+    ax1.set_xticks([0, 90, 180, 270, 360])
+    ax1.set_xlim(-5, 365)
+    ax1.set_title("orientation distribution", pad=12)
+    ax1.yaxis.set_major_locator(
+        MaxNLocator(nbins=5, integer=True)
+    )
+
+    # Orientation rose: radius represents the number of vectors.
+    counts, edges = np.histogram(
+        np.mod(np.deg2rad(ang), 2 * np.pi),
+        bins=36,
+        range=(0, 2 * np.pi)
+    )
+
+    ax2.bar(
+        0.5 * (edges[:-1] + edges[1:]),
+        counts,
+        width=np.diff(edges),
+        color=color_angle,
+        edgecolor="k",
+        alpha=0.7
+    )
+
+    ax2.set_theta_zero_location("E")
+    ax2.set_theta_direction(
+        1 if convention == "cartesian" else -1
+    )
+    ax2.set_title("orientation rose — count", pad=24)
+
+    radial_max = max(1.0, float(counts.max()) * 1.12)
+    ax2.set_ylim(0, radial_max)
+
+    radial_locator = MaxNLocator(nbins=4, integer=True)
+    radial_ticks = radial_locator.tick_values(0, radial_max)
+    radial_ticks = radial_ticks[
+        (radial_ticks > 0) & (radial_ticks < radial_max)
+    ]
+
+    ax2.set_yticks(radial_ticks)
+    ax2.set_rlabel_position(22.5)
+    ax2.tick_params(axis="x", pad=10)
+    ax2.grid(alpha=0.5)
+
+    title_size = 20
+    label_size = 18
+    tick_size = 16
+    legend_size = 16
+
+    for ax in axes:
+        ax.title.set_fontsize(title_size)
+        ax.title.set_fontweight("bold")
+
+        for label in (ax.xaxis.label, ax.yaxis.label):
+            label.set_fontsize(label_size)
+            label.set_fontweight("bold")
+
+        ax.tick_params(
+            axis="both", which="both",
+            labelsize=tick_size
+        )
+
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_fontweight("bold")
+
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.get_offset_text().set_fontsize(tick_size)
+            axis.get_offset_text().set_fontweight("bold")
+
+        legend = ax.get_legend()
+        if legend is not None:
+            for text in legend.get_texts():
+                text.set_fontsize(legend_size)
+                text.set_fontweight("bold")
+
+            legend.get_title().set_fontsize(legend_size)
+            legend.get_title().set_fontweight("bold")
+
+    return fig, axes, desc
+
+def plot_displacement_polar(field, sampling, *, n_mad=6.0,
+                            convention="cartesian", ax=None,
+                            color="tab:green", s=20, alpha=0.5):
+    """Plot displacement direction against magnitude in pm.
+
+    Each point represents one retained displacement vector.
+    Spatial positions are not represented.
+
+    Returns
+    -------
+    fig, ax, descriptors
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    desc = describe_displacements(
+        field, sampling,
+        n_mad=n_mad,
+        convention=convention
+    )
+
+    mag = field.magnitude_in(sampling, "pm")[desc["kept"]]
+    ang = field.angle(convention)[desc["kept"]]
+
+    valid = np.isfinite(mag) & np.isfinite(ang)
+    radii = mag[valid]
+    theta = np.mod(np.deg2rad(ang[valid]), 2 * np.pi)
+
+    if ax is None:
+        fig, ax = plt.subplots(
+            figsize=(9, 9),
+            dpi=120,
+            subplot_kw={"projection": "polar"},
+            constrained_layout=True
+        )
+    else:
+        if getattr(ax, "name", None) != "polar":
+            raise ValueError("ax must use a polar projection")
+        fig = ax.figure
+
+    ax.scatter(
+        theta, radii,
+        s=s,
+        color=color,
+        alpha=alpha,
+        edgecolors="none"
+    )
+
+    ax.set_theta_zero_location("E")
+    ax.set_theta_direction(
+        1 if convention == "cartesian" else -1
+    )
+
+    max_mag = float(radii.max()) if radii.size else 0.0
+    radial_max = 1.05 * max_mag if max_mag > 0 else 1.0
+    ax.set_ylim(0, radial_max)
+
+    locator = MaxNLocator(nbins=4)
+    ticks = locator.tick_values(0, radial_max)
+    ticks = ticks[(ticks > 0) & (ticks < radial_max)]
+
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{value:g} pm" for value in ticks])
+    ax.set_rlabel_position(22.5)
+
+    ax.set_title(
+        "displacement magnitude and direction",
+        fontsize=20,
+        fontweight="bold",
+        pad=24
+    )
+    ax.tick_params(axis="both", labelsize=16)
+    ax.tick_params(axis="x", pad=10)
+
+    for text in ax.get_xticklabels() + ax.get_yticklabels():
+        text.set_fontweight("bold")
+
+    ax.grid(alpha=0.5)
+
+    return fig, ax, desc
+
+def plot_magnitude_agreement(comparison, *, ax=None, labels=("polarmap", "VecMap"),
+                             title=None):
+    """Scatter plot of matched magnitudes from two analyses.
 
     Parameters
     ----------
-    reference_xy : array_like
-        ``(N, 2)`` reference column positions.
-    pair_vector : array_like
-        Translation from one reference column to its partner
-        (e.g. from :func:`polarmap.lattice.estimate_pair_vector`).
-    reference_fraction : float, default 0.5
-        ``f`` above. ``0.5`` is the pair midpoint (perovskite [110]); other
-        values describe an asymmetric internal coordinate, e.g. ``3/8`` for the
-        cation-to-anion spacing of wurtzite along ``c``. In that case the sign
-        of ``pair_vector`` decides which end is ``r0``.
-    tolerance : float, optional
-        Maximum partner mismatch in pixels; default ``0.28 * |pair_vector|``.
+    comparison : dict
+        Output of :func:`polarmap.validation.compare_displacement_fields`.
+    ax : matplotlib.axes.Axes, optional
+    labels : (str, str)
+        Names of the two analyses (first = ``field``, second = ``other``).
+    title : str, optional
 
     Returns
     -------
-    ideal_xy : numpy.ndarray
-        ``(M, 2)`` ideal target positions.
-    pair_indices : numpy.ndarray
-        ``(M, 2)`` indices ``(i0, i1)`` into ``reference_xy``.
+    fig, ax
     """
-    ref = np.asarray(reference_xy, dtype=float)
-    pair_vector = np.asarray(pair_vector, dtype=float)
-    spacing = np.linalg.norm(pair_vector)
-    if spacing <= 0:
-        raise ValueError("pair_vector must be non-zero")
-    if not 0.0 < reference_fraction < 1.0:
-        raise ValueError("reference_fraction must lie between 0 and 1")
-    tolerance = 0.28 * spacing if tolerance is None else float(tolerance)
-    if not 0.0 < tolerance < 0.5 * spacing:
-        raise ValueError("tolerance must be positive and smaller than half the "
-                         "pair spacing")
-    if len(ref) < 2:
-        return np.empty((0, 2)), np.empty((0, 2), dtype=int)
-
-    dist, partner = KDTree(ref).query(ref + pair_vector, k=1)
-    ideal, pairs = [], []
-    for i, (d, j) in enumerate(zip(dist, partner, strict=True)):
-        j = int(j)
-        if j == i or d > tolerance:
-            continue
-        if np.dot(ref[j] - ref[i], pair_vector) <= 0:
-            continue
-        ideal.append((1.0 - reference_fraction) * ref[i]
-                     + reference_fraction * ref[j])
-        pairs.append((i, j))
-    if not ideal:
-        return np.empty((0, 2)), np.empty((0, 2), dtype=int)
-    return np.array(ideal), np.array(pairs, dtype=int)
-
-
-def local_residual_maxima(residual, ideal_xy, search_radius):
-    """Brightest pixel of ``residual`` within a square window around each point.
-
-    Used to seed the weak target column near every ideal position before the
-    Gaussian refinement.
-
-    Parameters
-    ----------
-    residual : array_like
-        2-D image (bright atoms), usually after reference subtraction.
-    ideal_xy : array_like
-        ``(M, 2)`` window centres.
-    search_radius : int
-        Window half-width in pixels.
-
-    Returns
-    -------
-    numpy.ndarray
-        ``(M, 2)`` integer-valued seed positions.
-    """
-    residual = np.asarray(residual, dtype=float)
-    h, w = residual.shape
-    ideal_xy = np.asarray(ideal_xy, dtype=float).reshape(-1, 2)
-    seeds = np.empty_like(ideal_xy)
-    for i, (x, y) in enumerate(ideal_xy):
-        xi, yi = int(round(x)), int(round(y))
-        x0, x1 = max(0, xi - search_radius), min(w, xi + search_radius + 1)
-        y0, y1 = max(0, yi - search_radius), min(h, yi + search_radius + 1)
-        patch = residual[y0:y1, x0:x1]
-        py, px = np.unravel_index(np.argmax(patch), patch.shape)
-        seeds[i] = (x0 + px, y0 + py)
-    return seeds
-
-
-def measure_pair_displacement(image, reference_xy, pair_vector, *,
-                              reference_fraction=0.5, image_mode="ADF",
-                              pair_tolerance=None, subtract_reference=True,
-                              reference_subtract_box=None,
-                              weak_search_radius=None, weak_fit_box=None,
-                              max_displacement=None, max_ellipticity=3.0,
-                              min_amplitude=0.25, sign=1):
-    """Measure weak-column displacements relative to complete reference pairs.
-
-    Procedure (e.g. perovskite [110], where the B-containing column lies between
-    two bright A columns along the projected polar axis):
-
-    1. ideal positions from complete pairs (:func:`find_complete_reference_pairs`);
-    2. the bright reference columns are removed by Gaussian subtraction;
-    3. a seed for the weak column is the brightest residual pixel within
-       ``weak_search_radius`` of each ideal position;
-    4. the seed is refined by a 2-D Gaussian fit on the residual;
-    5. a vector is kept if the fit converged, the displacement is below
-       ``max_displacement``, the ellipticity below ``max_ellipticity`` and the
-       amplitude above ``min_amplitude`` times the median amplitude.
-
-    Parameters
-    ----------
-    image : array_like
-        2-D image.
-    reference_xy : array_like
-        ``(N, 2)`` refined positions of the bright reference columns (for
-        example ``split_by_amplitude(...).bright``).
-    pair_vector : array_like
-        Reference-to-partner translation.
-    reference_fraction : float, default 0.5
-        See :func:`find_complete_reference_pairs`.
-    image_mode : str, default "ADF"
-    pair_tolerance : float, optional
-        Pair matching tolerance (px), default ``0.28 * |pair_vector|``.
-    subtract_reference : bool, default True
-    reference_subtract_box : int, optional
-        Half-width for reference subtraction; default
-        ``max(4, round(0.22 * |pair_vector|))``.
-    weak_search_radius : int, optional
-        Default ``max(2, round(0.20 * |pair_vector|))``.
-    weak_fit_box : int, optional
-        Default ``max(3, round(0.16 * |pair_vector|))``.
-    max_displacement : float, optional
-        Maximum displacement in pixels; default ``0.30 * |pair_vector|``.
-    max_ellipticity : float, default 3.0
-    min_amplitude : float, default 0.25
-    sign : {1, -1}, default 1
-
-    Returns
-    -------
-    DisplacementField
-        ``per_site`` holds ``pair_indices``, ``seeds``, ``amplitude`` and
-        ``ellipticity``; ``diagnostics["residual"]`` is the reference-subtracted
-        image.
-    """
-    bright = as_bright_atoms(image, image_mode)
-    ref = np.asarray(reference_xy, dtype=float)
-    spacing = np.linalg.norm(pair_vector)
-
-    ideal, pairs = find_complete_reference_pairs(
-        ref, pair_vector, reference_fraction=reference_fraction,
-        tolerance=pair_tolerance)
-    if len(ideal) == 0:
-        raise RuntimeError(
-            "No complete reference pairs were found. Check the bright-column "
-            "selection, the pair vector and the pair tolerance.")
-
-    if weak_fit_box is None:
-        weak_fit_box = max(3, int(round(0.16 * spacing)))
-    if weak_search_radius is None:
-        weak_search_radius = max(2, int(round(0.20 * spacing)))
-    if max_displacement is None:
-        max_displacement = 0.30 * spacing
-    if reference_subtract_box is None:
-        reference_subtract_box = max(4, int(round(0.22 * spacing)))
-
-    inside = inside_image(ideal, bright.shape,
-                          margin=weak_fit_box + weak_search_radius + 1)
-    ideal, pairs = ideal[inside], pairs[inside]
-    if len(ideal) == 0:
-        raise RuntimeError("All complete pairs were removed by the edge filter.")
-
-    residual = (remove_columns_gaussian(bright, ref, box=reference_subtract_box,
-                                        image_mode="ADF")
-                if subtract_reference else bright.copy())
-    seeds = local_residual_maxima(residual, ideal, weak_search_radius)
-    found, params = refine_gaussian(residual, seeds, box=weak_fit_box,
-                                    image_mode="ADF", return_params=True)
-    disp = found - ideal
-    amp = params["amplitude"]
-    ell = params["ellipticity"]
-    good = (params["success"] & np.isfinite(amp) & (amp > 0)
-            & np.isfinite(ell) & (ell < max_ellipticity)
-            & (np.linalg.norm(disp, axis=1) < max_displacement))
-    if good.any():
-        med = np.nanmedian(amp[good])
-        if np.isfinite(med) and med > 0:
-            good &= amp > min_amplitude * med
-
-    result = DisplacementField(
-        ideal[:, 0], ideal[:, 1], disp[:, 0], disp[:, 1],
-        per_site={"pair_indices": pairs, "seeds": seeds, "amplitude": amp,
-                  "ellipticity": ell},
-        diagnostics={"residual": residual, "pair_vector": np.asarray(pair_vector),
-                     "reference_fraction": reference_fraction})
-    return result.subset(good).with_sign(sign)
-
-
-# ----------------------------------------------------------------------------
-# References from already-measured positions
-# ----------------------------------------------------------------------------
-def displacement_from_sublattices(A, B, v1, v2, offset=(0.5, 0.5), max_frac=0.34):
-    """Displacements from already measured A and B sublattice positions.
-
-    Use this when trusted sub-pixel positions of both sublattices are available
-    (from this package or any other detector). For each A column the ideal
-    position ``A + offset[0] v1 + offset[1] v2`` is matched to the nearest
-    measured B column within ``max_frac * cell``.
-
-    Note that this reference extrapolates the average lattice; the
-    complete-cage reference (:func:`displacement_from_cage`) is more robust to
-    lattice distortion.
-
-    Returns
-    -------
-    DisplacementField
-        Anchored at the ideal positions.
-    """
-    A = np.asarray(A, dtype=float)
-    B = np.asarray(B, dtype=float)
-    cell = 0.5 * (np.linalg.norm(v1) + np.linalg.norm(v2))
-    ideal = predict_second_sublattice(A, v1, v2, offset)
-    dist, idx = KDTree(B).query(ideal, k=1)
-    good = dist < max_frac * cell
-    found = B[idx]
-    return DisplacementField(ideal[good, 0], ideal[good, 1],
-                             found[good, 0] - ideal[good, 0],
-                             found[good, 1] - ideal[good, 1])
-
-
-def displacement_from_cage(polar_xy, ref_xy, k=4, max_frac=1.5):
-    """Displacement of each polar column from the centroid of its ``k`` nearest
-    reference columns.
-
-    For a perovskite [100] projection with ``k = 4`` this is the B-column shift
-    from its A cage, computed from measured positions only. Columns whose
-    ``k``-th neighbour is farther than ``max_frac`` times the median such
-    distance (edges, defects) are dropped.
-
-    Returns
-    -------
-    DisplacementField
-        Anchored at the cage centroids.
-    """
-    polar = np.asarray(polar_xy, dtype=float)
-    ref = np.asarray(ref_xy, dtype=float)
-    dist, idx = KDTree(ref).query(polar, k=k)
-    cage = ref[idx].mean(axis=1)
-    good = dist[:, -1] < max_frac * np.median(dist[:, -1])
-    return DisplacementField(cage[good, 0], cage[good, 1],
-                             polar[good, 0] - cage[good, 0],
-                             polar[good, 1] - cage[good, 1])
-
-
-def displacement_from_offset(ref_xy, polar_xy, ideal_offset_px, max_dist=None):
-    """Displacement from a fixed basis offset (dumbbell / wurtzite-type model).
-
-    The ideal polar position is ``ref + ideal_offset_px`` for every reference
-    column; the nearest measured polar column is matched and
-    ``r_polar - (r_ref + offset)`` returned. For a wurtzite projection with the
-    ``c`` axis along ``+y`` the ideal cation-to-anion offset is
-    ``(0, u_ref * c / sampling)`` with ``u_ref = 3/8``.
-
-    Parameters
-    ----------
-    ref_xy, polar_xy : array_like
-        ``(N, 2)`` and ``(M, 2)`` positions.
-    ideal_offset_px : array_like
-        Ideal offset in pixels.
-    max_dist : float, optional
-        Maximum match distance; default half the offset length.
-
-    Returns
-    -------
-    DisplacementField
-        Anchored at the ideal positions.
-    """
-    ref = np.asarray(ref_xy, dtype=float)
-    polar = np.asarray(polar_xy, dtype=float)
-    off = np.asarray(ideal_offset_px, dtype=float)
-    ideal = ref + off
-    dist, idx = KDTree(polar).query(ideal, k=1)
-    if max_dist is None:
-        max_dist = 0.5 * np.linalg.norm(off)
-    good = dist < max_dist
-    found = polar[idx]
-    return DisplacementField(ideal[good, 0], ideal[good, 1],
-                             found[good, 0] - ideal[good, 0],
-                             found[good, 1] - ideal[good, 1])
-
-
-# ----------------------------------------------------------------------------
-# Displacement -> polarization
-# ----------------------------------------------------------------------------
-def displacement_to_polarization(u_pm, z_star, cell_volume_nm3):
-    """Semi-quantitative polarization from a single-sublattice displacement.
-
-    .. math:: P = \\frac{e\\, Z^*\\, u}{\\Omega}
-
-    Parameters
-    ----------
-    u_pm : array_like
-        Displacement in pm.
-    z_star : float
-        Born effective charge of the displaced sublattice in units of ``e``
-        (e.g. about +7.1 for Ti in PbTiO3; the nominal ionic charge is +4).
-    cell_volume_nm3 : float
-        Unit-cell volume in nm^3 (e.g. ``a * a * c``).
-
-    Returns
-    -------
-    numpy.ndarray
-        Polarization in µC/cm^2.
-
-    Notes
-    -----
-    A rigorous polarization sums ``Z*_k u_k`` over every ion with anisotropic
-    Born-charge tensors; oxygen positions are not measured in HAADF images.
-    Report the measured displacement (pm) as the primary quantity.
-    """
-    e = 1.602176634e-19                          # C
-    u_m = np.asarray(u_pm, dtype=float) * 1e-12  # pm -> m
-    omega_m3 = float(cell_volume_nm3) * 1e-27    # nm^3 -> m^3
-    return e * z_star * u_m / omega_m3 * 100.0   # C/m^2 -> µC/cm^2
+    fig, ax = get_axes(ax, figsize=(5.5, 5.5))
+    ours = comparison["magnitude_pm"]
+    other = comparison["magnitude_other_pm"]
+    lo = min(np.min(ours), np.min(other))
+    hi = max(np.max(ours), np.max(other))
+    pad = 0.05 * (hi - lo) if hi > lo else 0.05
+    ax.scatter(other, ours, s=30, color="tab:blue", edgecolor="k", linewidth=0.4,
+               alpha=0.85, label="matched columns")
+    ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "--", color="tab:orange",
+            label="perfect agreement")
+    ax.set_xlim(lo - pad, hi + pad)
+    ax.set_ylim(lo - pad, hi + pad)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(f"{labels[1]} |d| (pm)")
+    ax.set_ylabel(f"{labels[0]} |d| (pm)")
+    ax.legend(frameon=False)
+    ax.set_title(title or f"n = {comparison['n_matched']}, bias "
+                          f"{comparison['magnitude_bias_pm']:+.2f} pm, RMSE "
+                          f"{comparison['magnitude_rmse_pm']:.2f} pm")
+    return fig, ax
