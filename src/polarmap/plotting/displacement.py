@@ -425,7 +425,7 @@ def plot_displacement_map(field, quantity="magnitude", *, image=None,
 
     return fig, ax
 
-    
+
 def plot_displacement_statistics(field, sampling, *, n_mad=6.0,
                                  convention="cartesian", bins=30, axes=None,
                                  color_magnitude="tab:blue",
