@@ -85,7 +85,6 @@ guide/batch
 algorithm
 conventions
 limitations
-migration
 ```
 
 ```{toctree}
