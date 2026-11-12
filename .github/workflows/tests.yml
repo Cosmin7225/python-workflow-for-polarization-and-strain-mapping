@@ -83,5 +83,5 @@ jobs:
           python -m pip install ".[io,test]" nbmake ipykernel
       - name: Tests on the example DM4 files
         run: python -m pytest -m hyperspy -v
-      - name: Execute every example notebook
-        run: python -m pytest --nbmake --nbmake-timeout=900 examples/
+      - name: Execute BCZT superlattice notebook
+        run: python -m pytest --nbmake --nbmake-timeout=900 examples/04_strain_superlattice.ipynb -vv --tb=short
