@@ -84,4 +84,4 @@ jobs:
       - name: Tests on the example DM4 files
         run: python -m pytest -m hyperspy -v
       - name: Execute BCZT superlattice notebook
-        run: python -m pytest --nbmake --nbmake-timeout=900 examples/04_strain_superlattice.ipynb -vv --tb=short
+        run: python -m pytest --nbmake --nbmake-timeout=900 examples/02_displacement_perovskite_100.ipynb -vv --tb=short
